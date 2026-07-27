@@ -1,4 +1,4 @@
-const CACHE_NAME = 'smart-notebook-v2';
+const CACHE_NAME = 'smart-notebook-v3';
 const ASSETS = [
   './',
   './index.html',

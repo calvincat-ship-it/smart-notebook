@@ -312,6 +312,24 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .field-note { font-size: .8rem; color: var(--ink-soft); margin: 6px 0 0; }
 
+/* API usage card */
+.usage-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--accent-soft);
+}
+.usage-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 3px 0;
+  font-size: .9rem;
+}
+.usage-row span { color: var(--ink-soft); }
+.usage-row b { font-variant-numeric: tabular-nums; font-size: 1rem; }
+.usage-since { margin: 6px 0 10px; font-size: .78rem; color: var(--ink-soft); }
+.usage-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.usage-actions .ghost-btn { flex: 1; justify-content: center; text-decoration: none; text-align: center; }
+
 /* Loading */
 .loading-overlay {
   position: fixed; inset: 0;

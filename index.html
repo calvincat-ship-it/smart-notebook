@@ -97,6 +97,19 @@
         <option value="30">完成 30 天後</option>
       </select>
       <p class="field-note">勾選完成的任務，過了設定天數會自動刪除卡片，並一併清除當初 Claude 對應建立的分類條列。</p>
+
+      <label class="field-label">API 用量</label>
+      <div class="usage-card">
+        <div class="usage-row"><span>整理次數</span><b id="usageCalls">0</b></div>
+        <div class="usage-row"><span>輸入 tokens</span><b id="usageIn">0</b></div>
+        <div class="usage-row"><span>輸出 tokens</span><b id="usageOut">0</b></div>
+        <p class="usage-since" id="usageSince">尚無紀錄</p>
+        <div class="usage-actions">
+          <a class="ghost-btn" href="https://console.anthropic.com/settings/usage" target="_blank" rel="noopener">查看官方用量／帳單</a>
+          <button id="usageResetBtn" class="ghost-btn" type="button">歸零</button>
+        </div>
+      </div>
+      <p class="field-note">這是「這台裝置透過本 App」的累計用量（讀每次回應的 usage），僅供參考。實際計費、以及跨裝置或同事的總用量請看官方主控台。使用中繼站時，所有人的用量都計入中繼站那把金鑰的帳單。</p>
     </div>
     <div class="modal-footer">
       <button id="saveSettingsBtn" class="primary-btn">儲存</button>

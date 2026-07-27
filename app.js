@@ -3,10 +3,12 @@
 /* ---------------- Storage ---------------- */
 const STORAGE_KEY = 'smart_notebook_v1';
 const SETTINGS_KEY = 'smart_notebook_settings_v1';
+const USAGE_KEY = 'smart_notebook_usage_v1';
 
 const defaultState = { categories: [], tasks: [] };
 let state = loadState();
 let settings = loadSettings();
+let usage = loadUsage();
 let attachedPdfText = '';
 let pendingFocus = null; // category index whose newly-added item should get focus
 
@@ -40,6 +42,31 @@ function loadSettings() {
 function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
+// Local, per-device tally of tokens used through this app, accumulated from the
+// `usage` field of each Claude response. It is a this-device estimate only — the
+// authoritative billing/total lives in the Anthropic console.
+function loadUsage() {
+  let u;
+  try { u = JSON.parse(localStorage.getItem(USAGE_KEY)) || {}; } catch (e) { u = {}; }
+  return {
+    calls: u.calls || 0,
+    inputTokens: u.inputTokens || 0,
+    outputTokens: u.outputTokens || 0,
+    since: u.since || '',
+  };
+}
+function saveUsage() {
+  localStorage.setItem(USAGE_KEY, JSON.stringify(usage));
+}
+function recordUsage(u) {
+  if (!u) return;
+  if (!usage.since) usage.since = todayStr();
+  usage.calls += 1;
+  usage.inputTokens +=
+    (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+  usage.outputTokens += u.output_tokens || 0;
+  saveUsage();
+}
 
 /* ---------------- Elements ---------------- */
 const $ = (id) => document.getElementById(id);
@@ -65,6 +92,11 @@ const els = {
   accessCodeInput: $('accessCodeInput'),
   modelSelect: $('modelSelect'),
   autoDeleteSelect: $('autoDeleteSelect'),
+  usageCalls: $('usageCalls'),
+  usageIn: $('usageIn'),
+  usageOut: $('usageOut'),
+  usageSince: $('usageSince'),
+  usageResetBtn: $('usageResetBtn'),
   loadingOverlay: $('loadingOverlay'),
   loadingText: $('loadingText'),
   toast: $('toast'),
@@ -337,6 +369,7 @@ async function callClaude(userInput) {
   }
 
   const data = await res.json();
+  recordUsage(data.usage);
   if (data.stop_reason === 'refusal') {
     throw new Error('Claude 拒絕處理這段內容。');
   }
@@ -840,12 +873,28 @@ function openSettings() {
   els.accessCodeInput.value = settings.accessCode || '';
   els.modelSelect.value = settings.model || 'claude-opus-4-8';
   els.autoDeleteSelect.value = settings.autoDeleteDays || 'never';
+  renderUsage();
   els.settingsModal.hidden = false;
+}
+
+function renderUsage() {
+  const n = (x) => (x || 0).toLocaleString('en-US');
+  els.usageCalls.textContent = n(usage.calls);
+  els.usageIn.textContent = n(usage.inputTokens);
+  els.usageOut.textContent = n(usage.outputTokens);
+  els.usageSince.textContent = usage.since ? `統計自 ${usage.since}` : '尚無紀錄';
 }
 function closeSettings() { els.settingsModal.hidden = true; }
 
 els.settingsBtn.addEventListener('click', openSettings);
 els.closeSettingsBtn.addEventListener('click', closeSettings);
+els.usageResetBtn.addEventListener('click', () => {
+  if (!confirm('把這台裝置的用量統計歸零？（只清除本機計數，不影響官方帳單）')) return;
+  usage = { calls: 0, inputTokens: 0, outputTokens: 0, since: '' };
+  saveUsage();
+  renderUsage();
+  toast('用量統計已歸零');
+});
 els.settingsModal.addEventListener('click', (e) => {
   if (e.target === els.settingsModal) closeSettings();
 });
