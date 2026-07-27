@@ -69,9 +69,15 @@
       <button id="closeSettingsBtn" class="icon-btn" aria-label="關閉">✕</button>
     </div>
     <div class="modal-body">
+      <label class="field-label" for="workerUrlInput">共用中繼站網址（選填）</label>
+      <input id="workerUrlInput" type="url" inputmode="url" placeholder="https://xxx.workers.dev" autocomplete="off">
+      <label class="field-label" for="accessCodeInput">中繼站存取碼</label>
+      <input id="accessCodeInput" type="password" placeholder="由中繼站管理者提供" autocomplete="off">
+      <p class="field-note">填了中繼站就用它呼叫 Claude，API 金鑰由中繼站保管、你不必填自己的。同事只要拿到網址與存取碼即可使用。沒填則使用下方自己的金鑰。</p>
+
       <label class="field-label" for="apiKeyInput">Anthropic API 金鑰</label>
       <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
-      <p class="field-note">金鑰只存在這台裝置的瀏覽器（localStorage），不會上傳到任何伺服器。</p>
+      <p class="field-note">沒有使用中繼站時才需要填。金鑰只存在這台裝置的瀏覽器（localStorage），不會上傳到任何伺服器。</p>
 
       <label class="field-label" for="modelSelect">模型</label>
       <select id="modelSelect">

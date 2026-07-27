@@ -33,6 +33,8 @@ function loadSettings() {
     apiKey: s.apiKey || '',
     model: s.model || 'claude-opus-4-8',
     autoDeleteDays: s.autoDeleteDays || 'never', // 'never' | '1' | '3' | '7' | '14' | '30'
+    workerUrl: s.workerUrl || '',   // optional Cloudflare Worker relay endpoint
+    accessCode: s.accessCode || '', // shared access code the relay checks
   };
 }
 function saveSettings() {
@@ -59,6 +61,8 @@ const els = {
   closeSettingsBtn: $('closeSettingsBtn'),
   saveSettingsBtn: $('saveSettingsBtn'),
   apiKeyInput: $('apiKeyInput'),
+  workerUrlInput: $('workerUrlInput'),
+  accessCodeInput: $('accessCodeInput'),
   modelSelect: $('modelSelect'),
   autoDeleteSelect: $('autoDeleteSelect'),
   loadingOverlay: $('loadingOverlay'),
@@ -263,9 +267,40 @@ const SYSTEM_PROMPT = [
   '全部用繁體中文。只輸出符合 schema 的 JSON。',
 ].join('\n');
 
+// The app can reach Claude two ways:
+//   A) direct  — the user's own API key in this browser (x-api-key → api.anthropic.com)
+//   B) relay   — a Cloudflare Worker that holds the key server-side, so colleagues
+//      only need the Worker URL + a shared access code (no personal API key).
+// Relay mode is used whenever a Worker URL is set. The Worker forwards to Anthropic
+// and returns Anthropic's response unchanged, so response parsing is identical.
+function claudeEndpoint() {
+  const relay = (settings.workerUrl || '').trim();
+  if (relay) {
+    return {
+      relay: true,
+      url: relay,
+      headers: {
+        'content-type': 'application/json',
+        'x-app-access-code': (settings.accessCode || '').trim(),
+      },
+    };
+  }
+  return {
+    relay: false,
+    url: 'https://api.anthropic.com/v1/messages',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': settings.apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+  };
+}
+
 async function callClaude(userInput) {
-  if (!settings.apiKey) {
-    throw new Error('尚未設定 API 金鑰，請點右上角 ⚙ 填入。');
+  const ep = claudeEndpoint();
+  if (!ep.relay && !settings.apiKey) {
+    throw new Error('尚未設定 API 金鑰或中繼站，請點右上角 ⚙ 設定。');
   }
   const today = new Date().toISOString().slice(0, 10);
   const existing = JSON.stringify(state.categories);
@@ -283,23 +318,22 @@ async function callClaude(userInput) {
     output_config: { format: { type: 'json_schema', schema: RESULT_SCHEMA } },
   };
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetch(ep.url, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
+    headers: ep.headers,
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.json()).error?.message || ''; } catch (e) { /* ignore */ }
-    if (res.status === 401) throw new Error('API 金鑰無效，請到設定重新確認。');
+    if (ep.relay && (res.status === 401 || res.status === 403)) {
+      throw new Error('中繼站拒絕：存取碼錯誤，或此網域未被中繼站允許。');
+    }
+    if (!ep.relay && res.status === 401) throw new Error('API 金鑰無效，請到設定重新確認。');
     if (res.status === 429) throw new Error('請求太頻繁或額度不足，請稍後再試。');
-    throw new Error(`API 錯誤 ${res.status}${detail ? '：' + detail : ''}`);
+    const where = ep.relay ? '中繼站' : 'API';
+    throw new Error(`${where}錯誤 ${res.status}${detail ? '：' + detail : ''}`);
   }
 
   const data = await res.json();
@@ -802,6 +836,8 @@ function moveBullet(src, targetCat) {
 /* ---------------- Settings modal ---------------- */
 function openSettings() {
   els.apiKeyInput.value = settings.apiKey || '';
+  els.workerUrlInput.value = settings.workerUrl || '';
+  els.accessCodeInput.value = settings.accessCode || '';
   els.modelSelect.value = settings.model || 'claude-opus-4-8';
   els.autoDeleteSelect.value = settings.autoDeleteDays || 'never';
   els.settingsModal.hidden = false;
@@ -815,6 +851,8 @@ els.settingsModal.addEventListener('click', (e) => {
 });
 els.saveSettingsBtn.addEventListener('click', () => {
   settings.apiKey = els.apiKeyInput.value.trim();
+  settings.workerUrl = els.workerUrlInput.value.trim();
+  settings.accessCode = els.accessCodeInput.value.trim();
   settings.model = els.modelSelect.value;
   settings.autoDeleteDays = els.autoDeleteSelect.value;
   saveSettings();

@@ -1,0 +1,10 @@
+name = "smart-notebook-relay"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# 這裡「不要」寫金鑰。用下列指令設定 Secrets（或在 Cloudflare 儀表板設定）：
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put APP_ACCESS_CODE
+#
+# 部署：npx wrangler deploy
+# 詳細步驟見 README.md
