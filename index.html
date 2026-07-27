@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#4f46e5">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>智慧記事本</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon.svg">
+<link rel="stylesheet" href="style.css">
+<!-- pdf.js for client-side PDF text extraction (phase 1 loads from CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+<header class="app-header">
+  <h1>智慧記事本</h1>
+  <div class="header-actions">
+    <button id="settingsBtn" class="icon-btn" title="設定" aria-label="設定">⚙</button>
+  </div>
+</header>
+
+<main>
+  <!-- Input card -->
+  <section class="card input-card">
+    <textarea id="inputText" rows="5" placeholder="在這裡打字，或附加 PDF 文件…&#10;例如：週一下午開部門會議，確認 Q3 預算，8/15 前要交評鑑資料。"></textarea>
+    <div class="input-tools">
+      <button id="micBtn" class="ghost-btn" type="button" title="語音輸入" hidden>🎤 語音</button>
+      <label class="ghost-btn" for="pdfInput">📄 附加 PDF</label>
+      <input id="pdfInput" type="file" accept="application/pdf" hidden>
+      <span id="attachInfo" class="attach-info" hidden></span>
+    </div>
+    <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
+    <button id="processBtn" class="primary-btn">整理</button>
+  </section>
+
+  <div id="emptyHint" class="empty-hint">
+    <p>還沒有內容。輸入一些文字或 PDF，按「整理」，Claude 會自動分類並找出待辦。</p>
+    <button id="emptyAddCatBtn" class="ghost-btn">＋ 自建分類</button>
+  </div>
+
+  <!-- Tasks -->
+  <section id="tasksSection" class="section" hidden>
+    <h2 class="section-title">📌 待辦任務</h2>
+    <div id="tasksList"></div>
+  </section>
+
+  <!-- Categories -->
+  <section id="categoriesSection" class="section" hidden>
+    <div class="section-head">
+      <h2 class="section-title">🗂 分類整理</h2>
+      <div class="head-btns">
+        <button id="addCatBtn" class="link-btn">＋ 新增分類</button>
+        <button id="clearBtn" class="link-btn">清空</button>
+      </div>
+    </div>
+    <div id="categoriesList"></div>
+  </section>
+</main>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="modal-backdrop" hidden>
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>設定</h2>
+      <button id="closeSettingsBtn" class="icon-btn" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="field-label" for="apiKeyInput">Anthropic API 金鑰</label>
+      <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
+      <p class="field-note">金鑰只存在這台裝置的瀏覽器（localStorage），不會上傳到任何伺服器。</p>
+
+      <label class="field-label" for="modelSelect">模型</label>
+      <select id="modelSelect">
+        <option value="claude-opus-4-8">Claude Opus 4.8（品質最佳）</option>
+        <option value="claude-sonnet-5">Claude Sonnet 5（速度快、較省）</option>
+        <option value="claude-haiku-4-5">Claude Haiku 4.5（最便宜）</option>
+      </select>
+      <p class="field-note">日常大量使用可選 Sonnet 5 省成本；要最準確用 Opus 4.8。</p>
+
+      <label class="field-label" for="autoDeleteSelect">已完成任務自動刪除</label>
+      <select id="autoDeleteSelect">
+        <option value="never">不自動刪除</option>
+        <option value="1">完成 1 天後</option>
+        <option value="3">完成 3 天後</option>
+        <option value="7">完成 7 天後</option>
+        <option value="14">完成 14 天後</option>
+        <option value="30">完成 30 天後</option>
+      </select>
+      <p class="field-note">勾選完成的任務，過了設定天數會自動刪除卡片，並一併清除當初 Claude 對應建立的分類條列。</p>
+    </div>
+    <div class="modal-footer">
+      <button id="saveSettingsBtn" class="primary-btn">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Loading overlay -->
+<div id="loadingOverlay" class="loading-overlay" hidden>
+  <div class="spinner"></div>
+  <p id="loadingText">Claude 整理中…</p>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
