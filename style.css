@@ -42,6 +42,7 @@ body {
   box-shadow: var(--shadow);
 }
 .app-header h1 { font-size: 1.2rem; margin: 0; font-weight: 700; }
+.app-version { font-size: .72rem; font-weight: 600; opacity: .7; vertical-align: middle; letter-spacing: .3px; }
 .header-actions { display: flex; gap: 6px; }
 .icon-btn {
   background: rgba(255, 255, 255, .15);
