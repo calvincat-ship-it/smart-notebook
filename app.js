@@ -11,8 +11,10 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // GOOGLE_CLIENT_ID is filled in once the user creates a new OAuth Web client
 // (its own client = its own private appDataFolder, isolated from other apps).
 // Shown after the app name in the header so the user can see which build they're
-// on. Keep in step with the sw.js CACHE_NAME version on every deploy.
-const APP_VERSION = 'v9';
+// on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
+// changes bump the minor directly (v9 → v9.01), big features confirm first.
+// Keep in step with the sw.js CACHE_NAME on every deploy.
+const APP_VERSION = 'v9.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
