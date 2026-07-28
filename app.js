@@ -11,7 +11,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // GOOGLE_CLIENT_ID is filled in once the user creates a new OAuth Web client
 // (its own client = its own private appDataFolder, isolated from other apps).
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
-const GOOGLE_CLIENT_ID = ''; // e.g. '1234-abc.apps.googleusercontent.com'
+const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata';
 const CLOUD_FILENAME = 'notebook-backup.json';
 
