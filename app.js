@@ -15,13 +15,62 @@ const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.goo
 const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata';
 const CLOUD_FILENAME = 'notebook-backup.json';
 
-const defaultState = { categories: [], tasks: [] };
+// Attachments: any file type, capped at 10MB each. The binary lives locally in
+// IndexedDB and, when cloud sync is on, as its own file in the Drive
+// appDataFolder (so the frequently-synced JSON bundle stays small). The bundle
+// only carries lightweight metadata (id/name/type/size/driveFileId/link).
+const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+
+// Every note bullet gets a stable id (編號). Tasks and attachments reference the
+// same id, so a note item, its task, and its file always correspond — and stay
+// linked across Claude's re-merges (ids are preserved by text-matching, see
+// mergeCategories). The app owns ids; Claude's own I/O stays text-based.
+function genId() {
+  return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+const defaultState = { categories: [], tasks: [], attachments: [] };
 let state = loadState();
 let settings = loadSettings();
 let usage = loadUsage();
 let cloudState = loadCloudState();
-let attachedPdfText = '';
-let pendingFocus = null; // category index whose newly-added item should get focus
+// Files staged in the input card, awaiting 整理:
+let pendingFiles = [];       // [{ ref, name, type, size, blob }] from 📎 附加檔案 (kept as attachments)
+let attachedPdf = null;      // { ref, name, type, size, blob, text } from 📄 上傳 PDF (text-extracted; kept only if user confirms)
+let pendingFocus = null;     // category index whose newly-added item should get focus
+
+/* ---------------- Attachment blob store (IndexedDB) ---------------- */
+// localStorage can't hold binary; blobs are cached here keyed by attachment id.
+// On another device an attachment's blob is fetched from Drive on first open.
+let _idbPromise = null;
+function idb() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open('smart_notebook_files', 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains('blobs')) req.result.createObjectStore('blobs');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _idbPromise;
+}
+async function idbTx(mode, fn) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('blobs', mode);
+    const store = tx.objectStore('blobs');
+    let out;
+    const r = fn(store);
+    if (r) r.onsuccess = () => { out = r.result; };
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+const idbPutBlob = (id, blob) => idbTx('readwrite', (s) => s.put(blob, id));
+const idbGetBlob = (id) => idbTx('readonly', (s) => s.get(id));
+const idbDelBlob = (id) => idbTx('readwrite', (s) => s.delete(id));
 
 // Cloud runtime (in-memory only)
 let gisToken = null;      // access token, never persisted
@@ -34,17 +83,81 @@ function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return structuredClone(defaultState);
     const parsed = JSON.parse(raw);
-    return {
+    return normalizeState({
       categories: Array.isArray(parsed.categories) ? parsed.categories : [],
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
-    };
+      attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
+    });
   } catch (e) {
     return structuredClone(defaultState);
   }
 }
+
+// Bring any stored/loaded/restored state up to the current shape:
+//  - bullets: plain string  → { id, text }
+//  - tasks:   linkedBullets (text) → linkedItemIds (bullet ids), matched by text
+//  - attachments: array of { id, name, type, size, driveFileId, addedAt, linkedItemIds }
+// Idempotent, so it's safe to run on load and after a cloud restore.
+function normalizeState(s) {
+  const textToIds = new Map(); // bullet text → queue of ids (for task migration)
+  const cats = Array.isArray(s.categories) ? s.categories : [];
+  for (const c of cats) {
+    c.subsections = Array.isArray(c.subsections) ? c.subsections : [];
+    for (const sub of c.subsections) {
+      sub.bullets = (Array.isArray(sub.bullets) ? sub.bullets : []).map((b) => {
+        const bullet = (typeof b === 'string')
+          ? { id: genId(), text: b }
+          : { id: b && b.id ? b.id : genId(), text: b && typeof b.text === 'string' ? b.text : '' };
+        if (!textToIds.has(bullet.text)) textToIds.set(bullet.text, []);
+        textToIds.get(bullet.text).push(bullet.id);
+        return bullet;
+      });
+    }
+  }
+  const takeIdForText = (t) => {
+    const q = textToIds.get(t);
+    return q && q.length ? q[0] : null; // first match; don't consume (a text may map several tasks)
+  };
+  const tasks = (Array.isArray(s.tasks) ? s.tasks : []).map((t) => {
+    let linkedItemIds = Array.isArray(t.linkedItemIds) ? t.linkedItemIds.filter((x) => typeof x === 'string') : null;
+    if (!linkedItemIds) {
+      // migrate from old text-based linkedBullets
+      linkedItemIds = [];
+      for (const bt of (Array.isArray(t.linkedBullets) ? t.linkedBullets : [])) {
+        const id = takeIdForText(bt);
+        if (id) linkedItemIds.push(id);
+      }
+    }
+    return {
+      id: t.id || ('tk_' + genId()),
+      task: t.task || '',
+      dueDate: t.dueDate || '',
+      importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
+      sourceCategory: t.sourceCategory || '',
+      linkedItemIds,
+      done: !!t.done,
+      ...(t.completedAt ? { completedAt: t.completedAt } : {}),
+    };
+  });
+  const attachments = (Array.isArray(s.attachments) ? s.attachments : []).map((a) => ({
+    id: a.id || genId(),
+    name: a.name || '附件',
+    type: a.type || '',
+    size: a.size || 0,
+    driveFileId: a.driveFileId || '',
+    addedAt: a.addedAt || '',
+    linkedItemIds: Array.isArray(a.linkedItemIds) ? a.linkedItemIds.filter((x) => typeof x === 'string') : [],
+  }));
+  return { categories: cats, tasks, attachments };
+}
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   scheduleCloudBackup();
+}
+// Persist without scheduling a cloud backup — used after filling in attachment
+// driveFileIds during a backup, so we don't retrigger the backup loop.
+function saveStateQuiet() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 function loadSettings() {
   let s;
@@ -109,7 +222,8 @@ const els = {
   micBtn: $('micBtn'),
   micHint: $('micHint'),
   pdfInput: $('pdfInput'),
-  attachInfo: $('attachInfo'),
+  attachInput: $('attachInput'),
+  pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
   emptyHint: $('emptyHint'),
   tasksSection: $('tasksSection'),
@@ -169,27 +283,97 @@ async function extractPdfText(file) {
   return text.trim();
 }
 
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+function fileIcon(type, name) {
+  const t = (type || '').toLowerCase();
+  const n = (name || '').toLowerCase();
+  if (t.startsWith('image/')) return '🖼';
+  if (t === 'application/pdf' || n.endsWith('.pdf')) return '📄';
+  if (t.includes('word') || /\.docx?$/.test(n)) return '📝';
+  if (t.includes('sheet') || t.includes('excel') || /\.xlsx?$|\.csv$/.test(n)) return '📊';
+  return '📎';
+}
+
+// 📎 附加檔案 — any file type, kept as an attachment (not used as text input).
+els.attachInput.addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    if (file.size > MAX_ATTACH_BYTES) {
+      toast(`「${file.name}」超過 10MB，無法附加。`);
+      continue;
+    }
+    pendingFiles.push({
+      ref: 'a' + genId(),
+      name: file.name,
+      type: file.type || '',
+      size: file.size,
+      blob: file,
+    });
+  }
+  els.attachInput.value = '';
+  renderPending();
+});
+
+// 📄 上傳 PDF — text is extracted and fed to Claude. The file itself is kept
+// only if the user confirms after 整理 (per the "keep this document?" rule).
 els.pdfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
+  els.pdfInput.value = '';
   if (!file) return;
+  attachedPdf = { ref: 'a' + genId(), name: file.name, type: file.type || 'application/pdf', size: file.size, blob: file, text: '', reading: true };
+  renderPending();
   try {
-    els.attachInfo.hidden = false;
-    els.attachInfo.innerHTML = '讀取 PDF…';
-    attachedPdfText = await extractPdfText(file);
-    els.attachInfo.innerHTML =
-      `📄 ${file.name}（${attachedPdfText.length} 字）<button title="移除" aria-label="移除">✕</button>`;
-    els.attachInfo.querySelector('button').addEventListener('click', clearAttachment);
-    if (!attachedPdfText) toast('這份 PDF 抽不到文字（可能是掃描圖檔）。');
+    attachedPdf.text = await extractPdfText(file);
+    attachedPdf.reading = false;
+    if (!attachedPdf.text) toast('這份 PDF 抽不到文字（可能是掃描圖檔）。');
   } catch (err) {
-    clearAttachment();
+    attachedPdf = null;
     toast('PDF 讀取失敗：' + err.message);
   }
-  els.pdfInput.value = '';
+  renderPending();
 });
-function clearAttachment() {
-  attachedPdfText = '';
-  els.attachInfo.hidden = true;
-  els.attachInfo.innerHTML = '';
+
+function clearPending() {
+  pendingFiles = [];
+  attachedPdf = null;
+  renderPending();
+}
+
+function renderPending() {
+  const chips = [];
+  if (attachedPdf) {
+    const note = attachedPdf.reading ? '讀取中…' : `${attachedPdf.text.length} 字，作為文字輸入`;
+    chips.push({ kind: 'pdf', ref: attachedPdf.ref, label: `${fileIcon(attachedPdf.type, attachedPdf.name)} ${attachedPdf.name}（${note}）` });
+  }
+  for (const f of pendingFiles) {
+    chips.push({ kind: 'file', ref: f.ref, label: `${fileIcon(f.type, f.name)} ${f.name}（${fmtSize(f.size)}）` });
+  }
+  els.pendingAttach.innerHTML = '';
+  els.pendingAttach.hidden = chips.length === 0;
+  for (const c of chips) {
+    const chip = document.createElement('span');
+    chip.className = 'attach-chip';
+    const label = document.createElement('span');
+    label.className = 'attach-chip-label';
+    label.textContent = c.label;
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.title = '移除';
+    rm.setAttribute('aria-label', '移除');
+    rm.textContent = '✕';
+    rm.addEventListener('click', () => {
+      if (c.kind === 'pdf') attachedPdf = null;
+      else pendingFiles = pendingFiles.filter((f) => f.ref !== c.ref);
+      renderPending();
+    });
+    chip.appendChild(label);
+    chip.appendChild(rm);
+    els.pendingAttach.appendChild(chip);
+  }
 }
 
 /* ---------------- Voice input (Web Speech API) ---------------- */
@@ -282,51 +466,73 @@ if (SpeechRec) {
 }
 
 /* ---------------- Claude API ---------------- */
-const RESULT_SCHEMA = {
-  type: 'object',
-  properties: {
-    categories: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          subsections: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                heading: { type: 'string' },
-                bullets: { type: 'array', items: { type: 'string' } },
+// Claude works in text (bullets are plain strings in its I/O). The app owns the
+// stable ids. When this batch carries attachments, we also ask Claude to return
+// `attachmentLinks`, mapping each attachment ref → the exact bullet text(s) it
+// belongs to, so the app can bind the file to that note item's id.
+function buildSchema(hasAttachments) {
+  const schema = {
+    type: 'object',
+    properties: {
+      categories: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            subsections: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  heading: { type: 'string' },
+                  bullets: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['heading', 'bullets'],
+                additionalProperties: false,
               },
-              required: ['heading', 'bullets'],
-              additionalProperties: false,
             },
           },
+          required: ['title', 'subsections'],
+          additionalProperties: false,
         },
-        required: ['title', 'subsections'],
-        additionalProperties: false,
+      },
+      tasks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            dueDate: { type: 'string' },
+            importance: { type: 'string', enum: ['high', 'medium', 'low'] },
+            sourceCategory: { type: 'string' },
+            linkedBullets: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['task', 'dueDate', 'importance', 'sourceCategory', 'linkedBullets'],
+          additionalProperties: false,
+        },
       },
     },
-    tasks: {
+    required: ['categories', 'tasks'],
+    additionalProperties: false,
+  };
+  if (hasAttachments) {
+    schema.properties.attachmentLinks = {
       type: 'array',
       items: {
         type: 'object',
         properties: {
-          task: { type: 'string' },
-          dueDate: { type: 'string' },
-          importance: { type: 'string', enum: ['high', 'medium', 'low'] },
-          sourceCategory: { type: 'string' },
-          linkedBullets: { type: 'array', items: { type: 'string' } },
+          ref: { type: 'string' },
+          bulletTexts: { type: 'array', items: { type: 'string' } },
         },
-        required: ['task', 'dueDate', 'importance', 'sourceCategory', 'linkedBullets'],
+        required: ['ref', 'bulletTexts'],
         additionalProperties: false,
       },
-    },
-  },
-  required: ['categories', 'tasks'],
-  additionalProperties: false,
-};
+    };
+    schema.required.push('attachmentLinks');
+  }
+  return schema;
+}
 
 const SYSTEM_PROMPT = [
   '你是一個上班族的記事本整理助理。使用者會提供零散的內容（打字、語音轉文字、或 PDF 文件文字）。',
@@ -371,25 +577,46 @@ function claudeEndpoint() {
   };
 }
 
-async function callClaude(userInput) {
+// Existing categories in text-only form (strip internal bullet ids) — Claude
+// only ever sees/returns bullet text; the app re-attaches ids on merge.
+function categoriesForClaude() {
+  return state.categories.map((c) => ({
+    title: c.title,
+    subsections: (c.subsections || []).map((s) => ({
+      heading: s.heading || '',
+      bullets: (s.bullets || []).map((b) => (typeof b === 'string' ? b : b.text)),
+    })),
+  }));
+}
+
+async function callClaude(userInput, batchAttachments) {
   const ep = claudeEndpoint();
   if (!ep.relay && !settings.apiKey) {
     throw new Error('尚未設定 API 金鑰或中繼站，請點右上角 ⚙ 設定。');
   }
   const today = new Date().toISOString().slice(0, 10);
-  const existing = JSON.stringify(state.categories);
+  const existing = JSON.stringify(categoriesForClaude());
+  const hasAtt = Array.isArray(batchAttachments) && batchAttachments.length > 0;
 
-  const userContent =
+  let userContent =
     `今天的日期是 ${today}。\n\n` +
     `目前既有的分類（JSON）：\n${existing}\n\n` +
     `以下是使用者這次新提供的內容，請合併整理並找出任務：\n"""\n${userInput}\n"""`;
+
+  if (hasAtt) {
+    const list = batchAttachments.map((a) => `- ref="${a.ref}"：檔名「${a.name}」`).join('\n');
+    userContent +=
+      `\n\n使用者這次還附加了以下檔案（附件）：\n${list}\n` +
+      '請在 attachmentLinks 回傳每個附件對應到「哪幾條 bullets」：bulletTexts 要放你這次為這些內容建立（或最相關）的 bullet 文字，' +
+      '文字必須與 categories 裡的完全一致。通常一個附件對應你這次新建立的那一條 bullet。若真的無法判斷，就對應到這次新內容最主要的那一條 bullet。每個附件的 ref 都要出現在 attachmentLinks 中。';
+  }
 
   const body = {
     model: settings.model || 'claude-opus-4-8',
     max_tokens: 8000,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userContent }],
-    output_config: { format: { type: 'json_schema', schema: RESULT_SCHEMA } },
+    output_config: { format: { type: 'json_schema', schema: buildSchema(hasAtt) } },
   };
 
   const res = await fetch(ep.url, {
@@ -424,46 +651,217 @@ async function callClaude(userInput) {
 async function processInput() {
   if (recognizing) stopRecording();
   const typed = els.inputText.value.trim();
-  const combined = [typed, attachedPdfText].filter(Boolean).join('\n\n');
-  if (!combined) { toast('請先輸入文字或附加 PDF。'); return; }
+  const pdfText = attachedPdf && attachedPdf.text ? attachedPdf.text : '';
+  const combined = [typed, pdfText].filter(Boolean).join('\n\n');
+  const hasFiles = pendingFiles.length > 0 || !!attachedPdf;
+
+  if (!combined && !hasFiles) { toast('請先輸入文字，或附加檔案。'); return; }
+
+  // Attachments-only (nothing for Claude to organize) — just stash the files.
+  if (!combined) {
+    setLoading(true);
+    try {
+      await stashAttachmentsOnly();
+      toast('已附加檔案 ✓');
+    } catch (err) { toast(err.message); }
+    finally { setLoading(false); }
+    return;
+  }
+
+  // The files carried in with this input, for Claude to link to note items.
+  const batch = pendingFiles.map((f) => ({ ref: f.ref, name: f.name, src: f }));
+  if (attachedPdf) batch.push({ ref: attachedPdf.ref, name: attachedPdf.name, src: attachedPdf, isPdf: true });
 
   setLoading(true);
   try {
-    const result = await callClaude(combined);
-    // categories: full merged set from Claude
+    const preTexts = allBulletTexts(); // snapshot before merge → detect new bullets
+    const result = await callClaude(combined, batch.map((b) => ({ ref: b.ref, name: b.name })));
+
+    // categories: merge Claude's full set, preserving ids of unchanged bullets
     if (Array.isArray(result.categories)) {
-      state.categories = result.categories;
+      state.categories = mergeCategories(result.categories);
     }
-    // tasks: append newly found, dedupe by task+dueDate
-    if (Array.isArray(result.tasks)) {
-      for (const t of result.tasks) {
-        if (!t.task) continue;
-        const dup = state.tasks.some(
-          (x) => x.task === t.task && (x.dueDate || '') === (t.dueDate || '')
-        );
-        if (!dup) {
-          state.tasks.push({
-            id: 'tk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-            task: t.task,
-            dueDate: t.dueDate || '',
-            importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
-            sourceCategory: t.sourceCategory || '',
-            linkedBullets: Array.isArray(t.linkedBullets) ? t.linkedBullets.filter((x) => typeof x === 'string') : [],
-            done: false,
-          });
-        }
-      }
+    // tasks: append newly found (dedupe by task+dueDate), text links → id links
+    if (Array.isArray(result.tasks)) appendTasks(result.tasks);
+
+    // attachments: resolve Claude's ref→bulletTexts links, then save the files
+    if (batch.length) {
+      const linkMap = buildAttachmentLinkMap(result.attachmentLinks, preTexts, batch);
+      await saveBatchAttachments(batch, linkMap);
     }
+
     saveState();
     render();
     els.inputText.value = '';
-    clearAttachment();
+    clearPending();
     toast('整理完成 ✓');
   } catch (err) {
     toast(err.message);
   } finally {
     setLoading(false);
   }
+}
+
+/* ---------------- Bullet / attachment linking helpers ---------------- */
+function allBulletTexts() {
+  const set = new Set();
+  for (const c of state.categories) {
+    for (const sub of c.subsections || []) {
+      for (const b of sub.bullets || []) set.add(typeof b === 'string' ? b : b.text);
+    }
+  }
+  return set;
+}
+function findBulletIdByText(text) {
+  for (const c of state.categories) {
+    for (const sub of c.subsections || []) {
+      for (const b of sub.bullets || []) {
+        if (b && b.text === text) return b.id;
+      }
+    }
+  }
+  return null;
+}
+function collectNewBulletIds(preTexts) {
+  const ids = [];
+  for (const c of state.categories) {
+    for (const sub of c.subsections || []) {
+      for (const b of sub.bullets || []) {
+        if (b && !preTexts.has(b.text)) ids.push(b.id);
+      }
+    }
+  }
+  return ids;
+}
+
+// Turn Claude's text bullets back into { id, text }, reusing the id of any
+// bullet whose text is unchanged (so tasks/attachments stay linked across
+// merges) and minting a fresh id for genuinely new bullets.
+function mergeCategories(returned) {
+  const pool = new Map(); // text → queue of reusable ids
+  for (const c of state.categories) {
+    for (const sub of c.subsections || []) {
+      for (const b of sub.bullets || []) {
+        if (!b || !b.id) continue;
+        if (!pool.has(b.text)) pool.set(b.text, []);
+        pool.get(b.text).push(b.id);
+      }
+    }
+  }
+  return (Array.isArray(returned) ? returned : []).map((c) => ({
+    title: c.title || '未命名分類',
+    subsections: (Array.isArray(c.subsections) ? c.subsections : []).map((s) => ({
+      heading: s.heading || '',
+      bullets: (Array.isArray(s.bullets) ? s.bullets : []).map((bt) => {
+        const text = typeof bt === 'string' ? bt : (bt && bt.text) || '';
+        const q = pool.get(text);
+        return { id: (q && q.length) ? q.shift() : genId(), text };
+      }),
+    })),
+  }));
+}
+
+function appendTasks(tasks) {
+  for (const t of tasks) {
+    if (!t.task) continue;
+    const dup = state.tasks.some(
+      (x) => x.task === t.task && (x.dueDate || '') === (t.dueDate || '')
+    );
+    if (dup) continue;
+    const linkedItemIds = [];
+    for (const bt of (Array.isArray(t.linkedBullets) ? t.linkedBullets : [])) {
+      const id = findBulletIdByText(bt);
+      if (id && !linkedItemIds.includes(id)) linkedItemIds.push(id);
+    }
+    state.tasks.push({
+      id: 'tk_' + genId(),
+      task: t.task,
+      dueDate: t.dueDate || '',
+      importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
+      sourceCategory: t.sourceCategory || '',
+      linkedItemIds,
+      done: false,
+    });
+  }
+}
+
+// ref → [bulletId]. Uses Claude's bulletTexts where they resolve; otherwise
+// falls back to every new bullet from this batch so a file is never orphaned.
+function buildAttachmentLinkMap(attachmentLinks, preTexts, batch) {
+  const map = new Map();
+  const newIds = collectNewBulletIds(preTexts);
+  for (const link of (Array.isArray(attachmentLinks) ? attachmentLinks : [])) {
+    if (!link || !link.ref) continue;
+    const ids = [];
+    for (const bt of (Array.isArray(link.bulletTexts) ? link.bulletTexts : [])) {
+      const id = findBulletIdByText(bt);
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    map.set(link.ref, ids);
+  }
+  for (const b of batch) {
+    const cur = map.get(b.ref);
+    if (!cur || cur.length === 0) map.set(b.ref, newIds.slice());
+  }
+  return map;
+}
+
+// A visible home for a file we couldn't link to any note (e.g. a scanned PDF, or
+// input that merged without producing a new bullet). Lives in a 📎 附件 category.
+function ensureHomeBullet(name) {
+  let cat = state.categories.find((c) => c.title === '📎 附件');
+  if (!cat) { cat = { title: '📎 附件', subsections: [] }; state.categories.push(cat); }
+  const sub = getGeneralSub(cat);
+  const bullet = { id: genId(), text: name };
+  sub.bullets.push(bullet);
+  return bullet.id;
+}
+
+async function saveBatchAttachments(batch, linkMap) {
+  for (const b of batch) {
+    if (b.isPdf) {
+      // Per the "keep this document?" rule: ask before retaining an uploaded PDF.
+      const keep = confirm(`要保留這份 PDF「${b.name}」作為附件嗎？\n（內容已整理完成；保留可日後從對應的筆記／任務開啟原始檔）`);
+      if (!keep) continue;
+    }
+    let linkedItemIds = (linkMap.get(b.ref) || []).slice();
+    if (linkedItemIds.length === 0) linkedItemIds = [ensureHomeBullet(b.name)];
+    await createAttachment(b.src, linkedItemIds);
+  }
+}
+
+async function stashAttachmentsOnly() {
+  for (const f of pendingFiles) {
+    await createAttachment(f, [ensureHomeBullet(f.name)]);
+  }
+  if (attachedPdf) {
+    const keep = confirm(`要保留這份 PDF「${attachedPdf.name}」作為附件嗎？`);
+    if (keep) await createAttachment(attachedPdf, [ensureHomeBullet(attachedPdf.name)]);
+  }
+  saveState();
+  render();
+  els.inputText.value = '';
+  clearPending();
+}
+
+// Persist one file: blob → IndexedDB now; the debounced cloud backup (triggered
+// by the caller's saveState) uploads the blob to Drive and fills in driveFileId.
+// Metadata goes into state and rides along in the synced bundle.
+async function createAttachment(src, linkedItemIds) {
+  const id = genId();
+  const blob = src.blob;
+  await idbPutBlob(id, blob);
+  const att = {
+    id,
+    name: src.name || '附件',
+    type: src.type || (blob && blob.type) || '',
+    size: src.size || (blob && blob.size) || 0,
+    driveFileId: '',
+    addedAt: new Date().toISOString(),
+    linkedItemIds: linkedItemIds.slice(),
+  };
+  state.attachments.push(att);
+  return att;
 }
 
 function setLoading(on) {
@@ -542,38 +940,63 @@ function todayStr() {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
-/* ---------------- Auto-delete completed tasks + linked bullets ---------------- */
-// Remove one bullet whose current text exactly matches `text`, preferring the
-// task's source category. Exact match keeps this safe: if the user edited the
-// bullet text, nothing is removed (rather than deleting the wrong note).
-function removeBulletByText(text, preferCategory) {
-  const order = [];
-  if (preferCategory) {
-    const pc = state.categories.find((c) => c.title === preferCategory);
-    if (pc) order.push(pc);
-  }
-  for (const c of state.categories) if (!order.includes(c)) order.push(c);
-  for (const c of order) {
-    for (const sub of c.subsections || []) {
-      const i = (sub.bullets || []).indexOf(text);
-      if (i > -1) {
-        sub.bullets.splice(i, 1);
-        cleanupEmptySub(c, sub);
-        return true;
-      }
-    }
-  }
-  return false;
+/* ---------------- Attachment lookups + delete cascade ---------------- */
+function attachmentsForBullet(bulletId) {
+  return state.attachments.filter((a) => (a.linkedItemIds || []).includes(bulletId));
+}
+function attachmentsForItems(itemIds) {
+  if (!itemIds || !itemIds.length) return [];
+  const set = new Set(itemIds);
+  return state.attachments.filter((a) => (a.linkedItemIds || []).some((id) => set.has(id)));
+}
+// Bullets whose id isn't found in any category (can happen if a merge failed to
+// preserve an id). Their attachments would otherwise be invisible, so we surface
+// them in a fallback box rather than silently dropping the file.
+function orphanAttachments() {
+  const live = new Set();
+  for (const c of state.categories)
+    for (const sub of c.subsections || [])
+      for (const b of sub.bullets || []) live.add(b.id);
+  return state.attachments.filter((a) => !(a.linkedItemIds || []).some((id) => live.has(id)));
 }
 
-// Manual delete. For a completed task, also clear the linked category bullets
-// (same rule as auto-delete). Confirms first since removing notes is
-// irreversible; un-done tasks are deleted alone, without touching notes.
+// Remove a file's local blob and (best-effort) its Drive copy.
+function purgeAttachment(att) {
+  idbDelBlob(att.id).catch(() => {});
+  if (att.driveFileId && cloudState.enabled) driveDelete(att.driveFileId).catch(() => {});
+}
+
+// Remove note bullets by id and drop any attachment left with no surviving
+// linked bullet. This is the cascade for explicit deletes (bullet ✕, category
+// delete, completed-task delete). Callers saveState()+render() afterwards.
+function removeBulletsByIds(ids) {
+  if (!ids || !ids.length) return;
+  const idSet = new Set(ids);
+  for (const c of state.categories) {
+    for (const sub of c.subsections || []) {
+      sub.bullets = (sub.bullets || []).filter((b) => !idSet.has(b.id));
+    }
+    c.subsections = (c.subsections || []).filter((sub) => (sub.bullets || []).length > 0);
+  }
+  const survivors = [];
+  for (const att of state.attachments) {
+    att.linkedItemIds = (att.linkedItemIds || []).filter((id) => !idSet.has(id));
+    if (att.linkedItemIds.length === 0) purgeAttachment(att);
+    else survivors.push(att);
+  }
+  state.attachments = survivors;
+}
+
+// Manual delete. For a completed task, also clear the linked note items (and
+// their attachments). Confirms first since removing notes is irreversible;
+// un-done tasks are deleted alone, leaving their notes (and files) intact.
 function deleteTask(t) {
-  const willClearNotes = t.done && (t.linkedBullets || []).length > 0;
+  const willClearNotes = t.done && (t.linkedItemIds || []).length > 0;
   if (willClearNotes) {
-    if (!confirm(`刪除已完成任務「${t.task}」？\n對應的分類筆記條列也會一併刪除。`)) return;
-    (t.linkedBullets || []).forEach((bt) => removeBulletByText(bt, t.sourceCategory));
+    const attCount = attachmentsForItems(t.linkedItemIds).length;
+    const extra = attCount ? `\n（含 ${attCount} 個附加檔案，也會一併刪除）` : '';
+    if (!confirm(`刪除已完成任務「${t.task}」？\n對應的分項筆記條列也會一併刪除。${extra}`)) return;
+    removeBulletsByIds(t.linkedItemIds);
   }
   state.tasks = state.tasks.filter((x) => x.id !== t.id);
   saveState();
@@ -591,7 +1014,7 @@ function pruneCompletedTasks() {
     if (t.done && t.completedAt) {
       const since = -(daysUntil(t.completedAt) ?? 0);
       if (since >= days) {
-        (t.linkedBullets || []).forEach((bt) => removeBulletByText(bt, t.sourceCategory));
+        removeBulletsByIds(t.linkedItemIds || []);
         changed = true;
         continue; // drop this task card
       }
@@ -603,10 +1026,70 @@ function pruneCompletedTasks() {
 
 /* ---------------- Rendering ---------------- */
 function render() {
-  const hasContent = state.categories.length > 0 || state.tasks.length > 0;
+  const orphans = orphanAttachments();
+  const hasContent = state.categories.length > 0 || state.tasks.length > 0 || orphans.length > 0;
   els.emptyHint.hidden = hasContent;
   renderTasks();
-  renderCategories();
+  renderCategories(orphans);
+}
+
+/* ---------------- Attachment chip + open/download ---------------- */
+function makeAttachChip(att, opts) {
+  opts = opts || {};
+  const chip = document.createElement('span');
+  chip.className = 'attach-chip saved';
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'attach-open';
+  open.textContent = `${fileIcon(att.type, att.name)} ${att.name}`;
+  open.title = '開啟附件';
+  open.addEventListener('click', () => openAttachment(att));
+  chip.appendChild(open);
+  if (opts.removable) {
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'attach-rm';
+    rm.textContent = '✕';
+    rm.title = '刪除附件';
+    rm.addEventListener('click', () => deleteAttachmentById(att.id));
+    chip.appendChild(rm);
+  }
+  return chip;
+}
+
+function deleteAttachmentById(id) {
+  const att = state.attachments.find((a) => a.id === id);
+  if (!att) return;
+  if (!confirm(`刪除附件「${att.name}」？此動作無法復原。`)) return;
+  state.attachments = state.attachments.filter((a) => a.id !== id);
+  purgeAttachment(att);
+  saveState();
+  render();
+}
+
+// Open the file. Prefer the local blob; if this device doesn't have it yet
+// (e.g. it was added on another device), fetch it from Drive on demand.
+async function openAttachment(att) {
+  try {
+    let blob = await idbGetBlob(att.id);
+    if (!blob && att.driveFileId) {
+      toast('從雲端下載附件…');
+      blob = await driveDownloadBlob(att.driveFileId);
+      if (blob) await idbPutBlob(att.id, blob);
+    }
+    if (!blob) { toast('找不到附件檔案（可能尚未同步到這台裝置）。'); return; }
+    const typed = att.type ? new Blob([blob], { type: att.type }) : blob;
+    const url = URL.createObjectURL(typed);
+    const w = window.open(url, '_blank');
+    if (!w) {
+      const a = document.createElement('a');
+      a.href = url; a.download = att.name;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    toast('開啟附件失敗：' + (e.message || e));
+  }
 }
 
 function renderTasks() {
@@ -687,6 +1170,15 @@ function renderTasks() {
     main.appendChild(text);
     main.appendChild(metaRow);
 
+    // Attachments that belong to this task's note items — openable right here.
+    const atts = attachmentsForItems(t.linkedItemIds);
+    if (atts.length) {
+      const attRow = document.createElement('div');
+      attRow.className = 'attach-row';
+      for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: false }));
+      main.appendChild(attRow);
+    }
+
     const del = document.createElement('button');
     del.className = 'task-del';
     del.textContent = '🗑';
@@ -700,8 +1192,9 @@ function renderTasks() {
   }
 }
 
-function renderCategories() {
-  els.categoriesSection.hidden = state.categories.length === 0;
+function renderCategories(orphans) {
+  orphans = orphans || orphanAttachments();
+  els.categoriesSection.hidden = state.categories.length === 0 && orphans.length === 0;
   els.categoriesList.innerHTML = '';
 
   state.categories.forEach((cat, ci) => {
@@ -759,21 +1252,23 @@ function renderCategories() {
         const li = document.createElement('li');
         li.className = 'bullet';
 
+        const row = document.createElement('div');
+        row.className = 'bullet-row';
+
         const handle = document.createElement('span');
         handle.className = 'drag-handle';
         handle.textContent = '⠿';
         handle.title = '按住拖曳到其他分類';
-        handle.addEventListener('pointerdown', (e) => startBulletDrag(e, { cat, sub, bi, text: b }));
+        handle.addEventListener('pointerdown', (e) => startBulletDrag(e, { cat, sub, bi, bulletId: b.id, text: b.text }));
 
         const span = document.createElement('span');
         span.className = 'bullet-text';
         span.contentEditable = 'true';
-        span.textContent = b;
+        span.textContent = b.text;
         span.addEventListener('blur', () => {
           const v = span.textContent.trim();
-          if (v) { sub.bullets[bi] = v; }
-          else { sub.bullets.splice(bi, 1); cleanupEmptySub(cat, sub); renderCategories(); }
-          saveState();
+          if (v) { b.text = v; saveState(); }
+          else { removeBulletsByIds([b.id]); saveState(); render(); }
         });
 
         const bDel = document.createElement('button');
@@ -781,15 +1276,27 @@ function renderCategories() {
         bDel.textContent = '✕';
         bDel.title = '刪除這一條';
         bDel.addEventListener('click', () => {
-          sub.bullets.splice(bi, 1);
-          cleanupEmptySub(cat, sub);
+          const atts = attachmentsForBullet(b.id);
+          if (atts.length && !confirm(`刪除這一條筆記？\n對應的 ${atts.length} 個附加檔案也會一併刪除。`)) return;
+          removeBulletsByIds([b.id]);
           saveState();
-          renderCategories();
+          render();
         });
 
-        li.appendChild(handle);
-        li.appendChild(span);
-        li.appendChild(bDel);
+        row.appendChild(handle);
+        row.appendChild(span);
+        row.appendChild(bDel);
+        li.appendChild(row);
+
+        // Files attached to this note item.
+        const atts = attachmentsForBullet(b.id);
+        if (atts.length) {
+          const attRow = document.createElement('div');
+          attRow.className = 'attach-row bullet-attach';
+          for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+          li.appendChild(attRow);
+        }
+
         ul.appendChild(li);
       });
       subEl.appendChild(ul);
@@ -806,6 +1313,31 @@ function renderCategories() {
     card.appendChild(bodyEl);
     els.categoriesList.appendChild(card);
   });
+
+  // Fallback: files whose linked note item no longer exists — keep them reachable.
+  if (orphans.length) {
+    const box = document.createElement('div');
+    box.className = 'category orphan-attach';
+    const head = document.createElement('div');
+    head.className = 'category-head';
+    const title = document.createElement('span');
+    title.className = 'category-title';
+    title.textContent = '📎 未對應的附件';
+    head.appendChild(title);
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'category-body';
+    const hint = document.createElement('div');
+    hint.className = 'cat-empty-hint';
+    hint.textContent = '這些檔案原本對應的筆記已不在，可在此開啟或刪除。';
+    bodyEl.appendChild(hint);
+    const attRow = document.createElement('div');
+    attRow.className = 'attach-row';
+    for (const a of orphans) attRow.appendChild(makeAttachChip(a, { removable: true }));
+    bodyEl.appendChild(attRow);
+    box.appendChild(head);
+    box.appendChild(bodyEl);
+    els.categoriesList.appendChild(box);
+  }
 
   if (pendingFocus != null) {
     const card = els.categoriesList.querySelector(`.category[data-ci="${pendingFocus}"]`);
@@ -835,7 +1367,7 @@ function cleanupEmptySub(cat, sub) {
 }
 function addItem(cat) {
   const s = getGeneralSub(cat);
-  s.bullets.push('');
+  s.bullets.push({ id: genId(), text: '' });
   pendingFocus = state.categories.indexOf(cat);
   saveState();
   renderCategories();
@@ -910,9 +1442,11 @@ function moveBullet(src, targetCat) {
 
 /* ---------------- Cloud sync (Google Drive appDataFolder) ---------------- */
 // Backup-first, whole-bundle, last-write-wins — same proven model as the blood
-// pressure app. Notes+tasks are stored as one JSON file in the user's OWN Drive
-// app-private folder (drive.appdata scope: can't see the user's other files).
-// Only the notes/tasks are synced — settings (API key / relay / model) stay local.
+// pressure app. Notes+tasks+attachment metadata are stored as one JSON file in
+// the user's OWN Drive app-private folder (drive.appdata scope: can't see the
+// user's other files); each attachment's binary is its own appDataFolder file.
+// Only notes/tasks/attachments are synced — settings (API key / relay / model)
+// stay local to each device.
 
 function ensureGis() {
   return new Promise((resolve, reject) => {
@@ -1009,23 +1543,82 @@ async function driveUpload(fileId, name, obj) {
   return res.json();
 }
 
+// Attachment binaries — each its own appDataFolder file. Binary is preserved by
+// building the multipart body as a Blob (text parts + the raw file Blob).
+async function driveUploadBlob(fileId, name, blob) {
+  const metadata = fileId ? { name } : { name, parents: ['appDataFolder'] };
+  const boundary = 'snbf' + Math.random().toString(36).slice(2);
+  const pre =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify(metadata) +
+    `\r\n--${boundary}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`;
+  const post = `\r\n--${boundary}--`;
+  const url = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`;
+  const res = await driveFetch(url, {
+    method: fileId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: new Blob([pre, blob, post]),
+  });
+  if (!res.ok) throw new Error('上傳附件失敗（' + res.status + '）。');
+  return res.json();
+}
+
+async function driveDownloadBlob(fileId) {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {});
+  if (!res.ok) throw new Error('下載附件失敗（' + res.status + '）。');
+  return res.blob();
+}
+
+async function driveDelete(fileId) {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) throw new Error('刪除雲端附件失敗（' + res.status + '）。');
+  return true;
+}
+
+// Upload one attachment's blob (from IndexedDB) to its own Drive file, recording
+// driveFileId so other devices can fetch it. No-op if already uploaded or if
+// there's no local blob (e.g. metadata that arrived from another device).
+async function uploadAttachmentBlob(att) {
+  if (!cloudState.enabled || att.driveFileId) return false;
+  const blob = await idbGetBlob(att.id);
+  if (!blob) return false;
+  const saved = await driveUploadBlob('', 'att_' + att.id, blob);
+  att.driveFileId = saved.id;
+  return true;
+}
+
+// Push any attachments that have a local blob but no Drive copy yet.
+async function uploadPendingAttachments() {
+  if (!cloudState.enabled) return;
+  let changed = false;
+  for (const att of state.attachments) {
+    if (!att.driveFileId) {
+      try { if (await uploadAttachmentBlob(att)) changed = true; } catch (e) { /* retried next backup */ }
+    }
+  }
+  if (changed) saveStateQuiet();
+}
+
 function buildBundle() {
   return {
     app: 'smart-notebook',
     v: 1,
     updatedAt: new Date().toISOString(),
     deviceId: cloudState.deviceId,
-    data: { categories: state.categories, tasks: state.tasks },
+    data: { categories: state.categories, tasks: state.tasks, attachments: state.attachments },
   };
 }
 
 function applyBundle(b) {
   if (!b || !b.data) return;
   suppressCloud = true;
-  state = {
+  state = normalizeState({
     categories: Array.isArray(b.data.categories) ? b.data.categories : [],
     tasks: Array.isArray(b.data.tasks) ? b.data.tasks : [],
-  };
+    attachments: Array.isArray(b.data.attachments) ? b.data.attachments : [],
+  });
   saveState();
   pruneCompletedTasks();
   render();
@@ -1045,6 +1638,7 @@ async function cloudBackupNow(opts) {
   if (!cloudState.enabled) return;
   setCloudBusy(true);
   try {
+    await uploadPendingAttachments(); // push blobs first so driveFileIds land in the bundle
     const bundle = buildBundle();
     const saved = await driveUpload(cloudState.fileId, CLOUD_FILENAME, bundle);
     cloudState.fileId = saved.id;
@@ -1071,7 +1665,7 @@ async function cloudConnect() {
     await getAccessToken(''); // user gesture — may show the Google popup
     const email = await fetchUserEmail();
     const remote = await driveFindFile(CLOUD_FILENAME);
-    const localEmpty = state.categories.length === 0 && state.tasks.length === 0;
+    const localEmpty = state.categories.length === 0 && state.tasks.length === 0 && state.attachments.length === 0;
 
     cloudState.enabled = true;
     cloudState.email = email;

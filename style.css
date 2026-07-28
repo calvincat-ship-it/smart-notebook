@@ -87,8 +87,34 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
   color: var(--ink-soft);
 }
 .ghost-btn:active { background: var(--bg); }
-.attach-info { font-size: .85rem; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
-.attach-info button { border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: .95rem; }
+/* Attachments — staged (pending) chips + saved chips under notes / on tasks */
+.pending-attach { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 3px 6px 3px 10px;
+  font-size: .82rem;
+  color: var(--accent);
+}
+.attach-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip button {
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-soft); font-size: .9rem; line-height: 1;
+  padding: 2px 4px; border-radius: 6px;
+}
+.attach-chip .attach-open {
+  color: var(--accent); font: inherit; font-size: .82rem;
+  max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: left; padding: 0;
+}
+.attach-chip .attach-open:active { opacity: .6; }
+.attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.bullet-attach { margin-left: 22px; }
+.orphan-attach .category-head { background: #fff7ed; }
+.orphan-attach .category-title { color: var(--amber); }
 
 /* Voice input */
 #micBtn.recording {
@@ -223,10 +249,10 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .sub-heading { font-weight: 600; font-size: .92rem; color: var(--ink); margin: 0 0 4px; }
 .bullets { list-style: none; margin: 0; padding: 0; }
 .bullet {
-  display: flex; align-items: flex-start; gap: 6px;
   padding: 4px 0;
   font-size: .93rem;
 }
+.bullet-row { display: flex; align-items: flex-start; gap: 6px; }
 .drag-handle {
   flex: 0 0 auto;
   color: #cbd5e1;

@@ -26,13 +26,15 @@
 <main>
   <!-- Input card -->
   <section class="card input-card">
-    <textarea id="inputText" rows="5" placeholder="在這裡打字，或附加 PDF 文件…&#10;例如：週一下午開部門會議，確認 Q3 預算，8/15 前要交評鑑資料。"></textarea>
+    <textarea id="inputText" rows="5" placeholder="在這裡打字或語音口述，可再附加相關檔案…&#10;例如：週一下午開部門會議，確認 Q3 預算，8/15 前要交評鑑資料。"></textarea>
     <div class="input-tools">
       <button id="micBtn" class="ghost-btn" type="button" title="語音輸入" hidden>🎤 語音</button>
-      <label class="ghost-btn" for="pdfInput">📄 附加 PDF</label>
+      <label class="ghost-btn" for="attachInput">📎 附加檔案</label>
+      <input id="attachInput" type="file" multiple hidden>
+      <label class="ghost-btn" for="pdfInput">📄 上傳 PDF</label>
       <input id="pdfInput" type="file" accept="application/pdf" hidden>
-      <span id="attachInfo" class="attach-info" hidden></span>
     </div>
+    <div id="pendingAttach" class="pending-attach" hidden></div>
     <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
     <button id="processBtn" class="primary-btn">整理</button>
   </section>
