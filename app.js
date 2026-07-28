@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v9.01';
+const APP_VERSION = 'v9.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1475,25 +1475,42 @@ function ensureGis() {
 }
 
 // promptMode: '' for user-gesture connect (may show popup), 'none' for silent
-// background refresh (fails quietly if there's no active Google session).
+// background refresh (fails quietly if there's no active Google session),
+// 'select_account' to force the account chooser (used by 更換帳號).
+//
+// The GIS token client is created once, and its callback is fixed at init time.
+// So the resolve/reject of the CURRENT call are held in module-scoped handlers
+// that the single callback settles — otherwise every call after the first would
+// hang (the callback would keep resolving the first, already-settled promise).
+let tokenResolve = null;
+let tokenReject = null;
+function settleToken(fn, arg) {
+  const r = fn === 'resolve' ? tokenResolve : tokenReject;
+  tokenResolve = tokenReject = null;
+  if (r) r(arg);
+}
 async function getAccessToken(promptMode) {
   if (!GOOGLE_CLIENT_ID) throw new Error('尚未設定 Google Client ID。');
   await ensureGis();
   return new Promise((resolve, reject) => {
+    // A new request supersedes any in-flight one.
+    if (tokenReject) { const rej = tokenReject; tokenResolve = tokenReject = null; rej(new Error('已被新的授權請求取代。')); }
+    tokenResolve = resolve;
+    tokenReject = reject;
     try {
       if (!tokenClient) {
         tokenClient = google.accounts.oauth2.initTokenClient({
           client_id: GOOGLE_CLIENT_ID,
           scope: DRIVE_SCOPE,
           callback: (resp) => {
-            if (resp && resp.access_token) { gisToken = resp.access_token; resolve(gisToken); }
-            else reject(new Error('未取得 Google 授權。'));
+            if (resp && resp.access_token) { gisToken = resp.access_token; settleToken('resolve', gisToken); }
+            else settleToken('reject', new Error('未取得 Google 授權。'));
           },
-          error_callback: (err) => reject(new Error('Google 授權未完成' + (err && err.type ? '（' + err.type + '）' : '') + '。')),
+          error_callback: (err) => settleToken('reject', new Error('Google 授權未完成' + (err && err.type ? '（' + err.type + '）' : '') + '。')),
         });
       }
       tokenClient.requestAccessToken({ prompt: promptMode || '' });
-    } catch (e) { reject(e); }
+    } catch (e) { settleToken('reject', e); }
   });
 }
 
