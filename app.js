@@ -300,7 +300,9 @@ function fileIcon(type, name) {
 }
 
 // 📎 附加檔案 — any file type, kept as an attachment (not used as text input).
-els.attachInput.addEventListener('change', (e) => {
+// Guarded so a stale-cache mismatch (e.g. old index.html + new app.js during a
+// PWA update) can't throw here and halt the rest of the init.
+if (els.attachInput) els.attachInput.addEventListener('change', (e) => {
   for (const file of e.target.files) {
     if (file.size > MAX_ATTACH_BYTES) {
       toast(`「${file.name}」超過 10MB，無法附加。`);
@@ -320,7 +322,7 @@ els.attachInput.addEventListener('change', (e) => {
 
 // 📄 上傳 PDF — text is extracted and fed to Claude. The file itself is kept
 // only if the user confirms after 整理 (per the "keep this document?" rule).
-els.pdfInput.addEventListener('change', async (e) => {
+if (els.pdfInput) els.pdfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   els.pdfInput.value = '';
   if (!file) return;
@@ -344,6 +346,7 @@ function clearPending() {
 }
 
 function renderPending() {
+  if (!els.pendingAttach) return; // tolerate a stale/mismatched HTML
   const chips = [];
   if (attachedPdf) {
     const note = attachedPdf.reading ? '讀取中…' : `${attachedPdf.text.length} 字，作為文字輸入`;
