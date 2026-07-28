@@ -98,6 +98,24 @@
       </select>
       <p class="field-note">勾選完成的任務，過了設定天數會自動刪除卡片，並一併清除當初 Claude 對應建立的分類條列。</p>
 
+      <div id="cloudSection" hidden>
+        <label class="field-label">多裝置同步（Google Drive）</label>
+        <div class="cloud-box">
+          <div id="cloudDisconnected">
+            <button id="cloudConnectBtn" class="ghost-btn cloud-connect">🔗 連結 Google 帳號</button>
+            <p class="field-note">登入你的 Google 帳號，把筆記與任務備份到你自己的 Drive（App 私有隱藏資料夾），多台裝置自動共用。只需要「App 資料夾」權限，看不到你其他 Drive 檔案。只同步筆記與任務，設定（金鑰等）不會上雲。</p>
+          </div>
+          <div id="cloudConnected" hidden>
+            <p class="cloud-status" id="cloudStatus"></p>
+            <div class="cloud-actions">
+              <button id="cloudBackupBtn" class="ghost-btn">⬆ 立即備份</button>
+              <button id="cloudRestoreBtn" class="ghost-btn">⬇ 從雲端還原</button>
+              <button id="cloudDisconnectBtn" class="ghost-btn">解除連結</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <label class="field-label">API 用量</label>
       <div class="usage-card">
         <div class="usage-row"><span>整理次數</span><b id="usageCalls">0</b></div>

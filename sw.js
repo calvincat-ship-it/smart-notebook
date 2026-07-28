@@ -1,4 +1,4 @@
-const CACHE_NAME = 'smart-notebook-v3';
+const CACHE_NAME = 'smart-notebook-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -26,8 +26,10 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
-  // Never touch API calls to Anthropic — always go to network.
-  if (event.request.url.includes('api.anthropic.com')) return;
+  // Only handle same-origin GETs. Cross-origin requests (Anthropic API / relay
+  // Worker, Google Identity Services, Drive API) must go straight to the network
+  // — caching them would be stale and could break auth.
+  if (new URL(event.request.url).origin !== self.location.origin) return;
   event.respondWith(
     fetch(event.request, { cache: 'no-store' })
       .then((response) => {

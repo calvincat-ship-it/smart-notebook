@@ -330,6 +330,19 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .usage-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .usage-actions .ghost-btn { flex: 1; justify-content: center; text-decoration: none; text-align: center; }
 
+/* Cloud sync */
+.cloud-box {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--accent-soft);
+}
+.cloud-connect { width: 100%; justify-content: center; }
+.cloud-status { margin: 0 0 10px; font-size: .88rem; white-space: pre-line; }
+.cloud-status.cloud-warn { color: var(--amber); font-weight: 600; }
+.cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.cloud-actions .ghost-btn { flex: 1 1 auto; justify-content: center; }
+
 /* Loading */
 .loading-overlay {
   position: fixed; inset: 0;
