@@ -71,6 +71,7 @@ async function idbTx(mode, fn) {
 const idbPutBlob = (id, blob) => idbTx('readwrite', (s) => s.put(blob, id));
 const idbGetBlob = (id) => idbTx('readonly', (s) => s.get(id));
 const idbDelBlob = (id) => idbTx('readwrite', (s) => s.delete(id));
+const idbClearBlobs = () => idbTx('readwrite', (s) => s.clear());
 
 // Cloud runtime (in-memory only)
 let gisToken = null;      // access token, never persisted
@@ -252,6 +253,7 @@ const els = {
   cloudConnectBtn: $('cloudConnectBtn'),
   cloudBackupBtn: $('cloudBackupBtn'),
   cloudRestoreBtn: $('cloudRestoreBtn'),
+  cloudSwitchBtn: $('cloudSwitchBtn'),
   cloudDisconnectBtn: $('cloudDisconnectBtn'),
   loadingOverlay: $('loadingOverlay'),
   loadingText: $('loadingText'),
@@ -1739,6 +1741,78 @@ function cloudDisconnect() {
   toast('已解除雲端連結（雲端資料保留）。');
 }
 
+// Wipe this device's notes/tasks/attachments (local only — no Drive files are
+// touched). Persists quietly; the caller decides whether to back up afterwards.
+async function clearAllLocalData() {
+  state = structuredClone(defaultState);
+  try { await idbClearBlobs(); } catch (e) { /* ignore */ }
+  saveStateQuiet();
+}
+
+// 更換帳號: disconnect current account → clear local data → connect the chosen
+// new account → restore from the new account's cloud (or stay empty if it has no
+// backup). The old account's own cloud backup is left untouched. We obtain the
+// new account's token FIRST (with the account chooser) so a cancelled sign-in
+// leaves the current setup and data intact.
+async function cloudSwitchAccount() {
+  if (!GOOGLE_CLIENT_ID) { toast('尚未設定 Google Client ID。'); return; }
+  if (!confirm(
+    '更換帳號會依序：\n' +
+    '1. 解除目前帳號的連結\n' +
+    '2. 清除這台裝置目前的筆記、任務與附件\n' +
+    '3. 登入你選擇的新帳號\n' +
+    '4. 從新帳號雲端還原（新帳號若無備份則保持空白）\n\n' +
+    '目前帳號的雲端備份會保留、不受影響。確定要繼續嗎？'
+  )) return;
+
+  setCloudBusy(true);
+  try {
+    // 1) Sign in to the NEW account first (force the account chooser).
+    gisToken = null;
+    await getAccessToken('select_account');
+    const email = await fetchUserEmail();
+
+    // 2) Disconnect the old account + wipe local data.
+    clearTimeout(cloudTimer);
+    cloudState.fileId = '';
+    cloudState.lastSyncedAt = '';
+    cloudState.pendingBackup = false;
+    cloudState.backupFailed = false;
+    await clearAllLocalData();
+
+    // 3) Now connected to the new account.
+    cloudState.enabled = true;
+    cloudState.email = email;
+
+    // 4) Restore from the new account's cloud, or stay empty.
+    const remote = await driveFindFile(CLOUD_FILENAME);
+    if (remote) {
+      const bundle = await driveDownload(remote.id);
+      cloudState.fileId = remote.id;
+      applyBundle(bundle);
+      cloudState.lastSyncedAt = bundle.updatedAt || new Date().toISOString();
+      cloudState.pendingBackup = false;
+      cloudState.backupFailed = false;
+      saveCloudState();
+      toast('已更換帳號並從雲端還原 ✓');
+    } else {
+      saveCloudState();
+      render();
+      await cloudBackupNow({}); // seed an (empty) backup file for the new account
+      toast('已更換帳號（新帳號無雲端備份，保持空白）✓');
+    }
+    updateCloudUI();
+  } catch (e) {
+    // A failure can happen either before the wipe (sign-in cancelled → nothing
+    // lost) or after (local cleared, new account connected). Reflect real state.
+    saveCloudState();
+    updateCloudUI();
+    toast('更換帳號失敗：' + (e.message || e));
+  } finally {
+    setCloudBusy(false);
+  }
+}
+
 // On open / return-to-foreground: if another device uploaded a newer bundle,
 // prompt before overwriting this device. Silent token (no popup) — if there's no
 // active Google session it just skips until the next manual action.
@@ -1776,7 +1850,7 @@ function fmtSyncTime(iso) {
 }
 
 function setCloudBusy(on) {
-  [els.cloudConnectBtn, els.cloudBackupBtn, els.cloudRestoreBtn, els.cloudDisconnectBtn].forEach((b) => {
+  [els.cloudConnectBtn, els.cloudBackupBtn, els.cloudRestoreBtn, els.cloudSwitchBtn, els.cloudDisconnectBtn].forEach((b) => {
     if (b) b.disabled = on;
   });
 }
@@ -1850,6 +1924,7 @@ els.saveSettingsBtn.addEventListener('click', () => {
 if (els.cloudConnectBtn) els.cloudConnectBtn.addEventListener('click', cloudConnect);
 if (els.cloudBackupBtn) els.cloudBackupBtn.addEventListener('click', () => cloudBackupNow({ manual: true }));
 if (els.cloudRestoreBtn) els.cloudRestoreBtn.addEventListener('click', cloudRestore);
+if (els.cloudSwitchBtn) els.cloudSwitchBtn.addEventListener('click', cloudSwitchAccount);
 if (els.cloudDisconnectBtn) els.cloudDisconnectBtn.addEventListener('click', cloudDisconnect);
 
 /* ---------------- Wire up ---------------- */
