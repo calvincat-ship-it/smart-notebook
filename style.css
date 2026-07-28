@@ -289,16 +289,19 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
   background: #fff;
   width: 100%;
   max-width: 520px;
+  max-height: 92vh;              /* keep the sheet within the viewport… */
+  display: flex;
+  flex-direction: column;        /* …so the body can scroll while header/footer stay put */
   border-radius: 18px 18px 0 0;
   padding-bottom: env(safe-area-inset-bottom);
   animation: slideUp .2s ease;
 }
 @keyframes slideUp { from { transform: translateY(30px); opacity: .6; } to { transform: none; opacity: 1; } }
-.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--line); }
+.modal-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--line); }
 .modal-header h2 { margin: 0; font-size: 1.1rem; }
 .modal-header .icon-btn { background: var(--bg); color: var(--ink); }
-.modal-body { padding: 16px; }
-.modal-footer { padding: 0 16px 20px; }
+.modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 16px; }
+.modal-footer { flex: 0 0 auto; padding: 16px; border-top: 1px solid var(--line); }
 .field-label { display: block; font-weight: 600; font-size: .9rem; margin: 14px 0 6px; }
 .field-label:first-child { margin-top: 0; }
 .modal-body input, .modal-body select {
