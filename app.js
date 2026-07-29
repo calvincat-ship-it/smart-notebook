@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v9.04';
+const APP_VERSION = 'v10.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -35,7 +35,7 @@ function genId() {
   return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-const defaultState = { categories: [], tasks: [], attachments: [] };
+const defaultState = { categories: [], tasks: [], attachments: [], expenses: [] };
 let state = loadState();
 let settings = loadSettings();
 let usage = loadUsage();
@@ -94,6 +94,7 @@ function loadState() {
       categories: Array.isArray(parsed.categories) ? parsed.categories : [],
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
       attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
+      expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
     });
   } catch (e) {
     return structuredClone(defaultState);
@@ -155,7 +156,20 @@ function normalizeState(s) {
     addedAt: a.addedAt || '',
     linkedItemIds: Array.isArray(a.linkedItemIds) ? a.linkedItemIds.filter((x) => typeof x === 'string') : [],
   }));
-  return { categories: cats, tasks, attachments };
+  // Expenses: consumption records pulled out of the notes by Claude. They live
+  // here (not in categories), and only surface in the 記帳 view.
+  const expenses = (Array.isArray(s.expenses) ? s.expenses : []).map((e) => {
+    const amount = Number(e.amount);
+    return {
+      id: e.id || ('ex_' + genId()),
+      item: typeof e.item === 'string' ? e.item : '',
+      amount: isFinite(amount) ? amount : 0,
+      date: /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') ? e.date : '',
+      category: (typeof e.category === 'string' && e.category.trim()) ? e.category.trim() : '其他',
+      createdAt: e.createdAt || '',
+    };
+  });
+  return { categories: cats, tasks, attachments, expenses };
 }
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -238,6 +252,20 @@ const els = {
   categoriesSection: $('categoriesSection'),
   categoriesList: $('categoriesList'),
   clearBtn: $('clearBtn'),
+  expenseHintBtn: $('expenseHintBtn'),
+  expenseBtn: $('expenseBtn'),
+  expenseModal: $('expenseModal'),
+  closeExpenseBtn: $('closeExpenseBtn'),
+  expStartDate: $('expStartDate'),
+  expStartClear: $('expStartClear'),
+  expRangeNote: $('expRangeNote'),
+  expTotal: $('expTotal'),
+  expCount: $('expCount'),
+  expByCat: $('expByCat'),
+  expByMonth: $('expByMonth'),
+  expList: $('expList'),
+  expEmpty: $('expEmpty'),
+  expDoneBtn: $('expDoneBtn'),
   settingsBtn: $('settingsBtn'),
   settingsModal: $('settingsModal'),
   closeSettingsBtn: $('closeSettingsBtn'),
@@ -523,8 +551,22 @@ function buildSchema(hasAttachments) {
           additionalProperties: false,
         },
       },
+      expenses: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            item: { type: 'string' },
+            amount: { type: 'number' },
+            date: { type: 'string' },
+            category: { type: 'string' },
+          },
+          required: ['item', 'amount', 'date', 'category'],
+          additionalProperties: false,
+        },
+      },
     },
-    required: ['categories', 'tasks'],
+    required: ['categories', 'tasks', 'expenses'],
     additionalProperties: false,
   };
   if (hasAttachments) {
@@ -555,6 +597,8 @@ const SYSTEM_PROMPT = [
   '重要：既有條列與子標題的文字請「原封不動保留」，不要改寫或刪除使用者既有的內容，只新增。回傳的 categories 必須是「合併後的完整結果」（包含既有的與新增的）。',
   '4. tasks 只回傳「這次新內容」中新發現的任務，不要重複回傳既有內容裡的任務。',
   '5. 每個任務要附上 linkedBullets：把 categories 裡「對應到這個任務的那幾條 bullets 文字」原封不動複製進來（通常就是你為這個任務所建立的那一條或幾條條列）。文字必須和 categories 裡的完全一致——之後任務完成刪除時會用它來一併清掉對應的條列。若某任務沒有對應的具體條列，linkedBullets 給空陣列 []。',
+  '6. 消費／支出類的內容（例如買了東西、花了多少錢、付款、繳費、帳單、含金額的開銷）請「只」整理進 expenses，「不要」放進 categories 或 bullets，也「不要」為它建立「財務紀錄」「花費」之類的分類——這些消費紀錄會呈現在獨立的「記帳」介面，不放在首頁分類。每筆 expense 欄位：item＝品項或用途（簡短，例如「午餐便當」「加油」）；amount＝金額，只放阿拉伯數字（不含貨幣符號、不含逗號，台幣通常是整數）；date＝消費日期 YYYY-MM-DD（內容沒寫日期就用上面提供的今天日期）；category＝你判斷的消費分類，用繁體中文簡短詞（例如 餐飲／交通／購物／娛樂／居家／醫療／教育／其他）。',
+  '7. expenses 只回傳「這次新內容」中的消費紀錄，不要重複既有的；若這次內容完全沒有消費，expenses 給空陣列 []。純粹記錄花費的內容通常不是待辦任務，不必再放進 tasks。',
   '全部用繁體中文。只輸出符合 schema 的 JSON。',
 ].join('\n');
 
@@ -694,6 +738,8 @@ async function processInput() {
     }
     // tasks: append newly found (dedupe by task+dueDate), text links → id links
     if (Array.isArray(result.tasks)) appendTasks(result.tasks);
+    // expenses: consumption records → 記帳 store (dedupe by item+amount+date)
+    if (Array.isArray(result.expenses)) appendExpenses(result.expenses);
 
     // attachments: resolve Claude's ref→bulletTexts links, then save the files
     if (batch.length) {
@@ -793,6 +839,21 @@ function appendTasks(tasks) {
       linkedItemIds,
       done: false,
     });
+  }
+}
+
+// Consumption records Claude pulled out this batch. Append-only with dedupe by
+// item+amount+date (Claude only returns the batch's new expenses), like tasks.
+function appendExpenses(list) {
+  for (const e of (Array.isArray(list) ? list : [])) {
+    const item = (e && typeof e.item === 'string') ? e.item.trim() : '';
+    const amount = Number(e && e.amount);
+    if (!item || !isFinite(amount)) continue;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test((e && e.date) || '') ? e.date : todayStr();
+    const category = (e && typeof e.category === 'string' && e.category.trim()) ? e.category.trim() : '其他';
+    const dup = state.expenses.some((x) => x.item === item && x.amount === amount && x.date === date);
+    if (dup) continue;
+    state.expenses.push({ id: 'ex_' + genId(), item, amount, date, category, createdAt: todayStr() });
   }
 }
 
@@ -1038,8 +1099,13 @@ function pruneCompletedTasks() {
 /* ---------------- Rendering ---------------- */
 function render() {
   const orphans = orphanAttachments();
-  const hasContent = state.categories.length > 0 || state.tasks.length > 0 || orphans.length > 0;
+  const expN = state.expenses.length;
+  const hasContent = state.categories.length > 0 || state.tasks.length > 0 || orphans.length > 0 || expN > 0;
   els.emptyHint.hidden = hasContent;
+  if (els.expenseHintBtn) {
+    els.expenseHintBtn.hidden = expN === 0;
+    els.expenseHintBtn.textContent = `💰 已記帳 ${expN} 筆消費 — 點此看統計與明細`;
+  }
   renderTasks();
   renderCategories(orphans);
 }
@@ -1635,7 +1701,7 @@ function buildBundle() {
     v: 1,
     updatedAt: new Date().toISOString(),
     deviceId: cloudState.deviceId,
-    data: { categories: state.categories, tasks: state.tasks, attachments: state.attachments },
+    data: { categories: state.categories, tasks: state.tasks, attachments: state.attachments, expenses: state.expenses },
   };
 }
 
@@ -1646,6 +1712,7 @@ function applyBundle(b) {
     categories: Array.isArray(b.data.categories) ? b.data.categories : [],
     tasks: Array.isArray(b.data.tasks) ? b.data.tasks : [],
     attachments: Array.isArray(b.data.attachments) ? b.data.attachments : [],
+    expenses: Array.isArray(b.data.expenses) ? b.data.expenses : [],
   });
   saveState();
   pruneCompletedTasks();
@@ -1896,6 +1963,192 @@ function updateCloudUI() {
     els.cloudStatus.textContent = s;
   }
 }
+
+/* ---------------- 記帳 (bookkeeping) ---------------- */
+// Start-date for the summary; '' = all records (the default).
+let expStartFilter = '';
+
+function fmtMoney(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return 'NT$' + v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+// Records counted by the summary, honouring the start-date filter. Undated
+// records are only included when no start date is set.
+function expensesInRange() {
+  if (!expStartFilter) return state.expenses.slice();
+  return state.expenses.filter((e) => e.date && e.date >= expStartFilter);
+}
+
+function openExpenses() {
+  els.expStartDate.value = expStartFilter;
+  renderExpenses();
+  els.expenseModal.hidden = false;
+}
+function closeExpenses() { els.expenseModal.hidden = true; }
+
+function makeBarRow(name, amount, pct, barPct) {
+  const row = document.createElement('div');
+  row.className = 'exp-bar-row';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'exp-bar-name';
+  nameEl.textContent = name;
+  const bar = document.createElement('div');
+  bar.className = 'exp-bar';
+  const fill = document.createElement('i');
+  fill.style.width = Math.max(2, Math.round(barPct)) + '%';
+  bar.appendChild(fill);
+  const amt = document.createElement('span');
+  amt.className = 'exp-bar-amt';
+  amt.textContent = fmtMoney(amount) + (pct != null ? ` · ${Math.round(pct)}%` : '');
+  row.appendChild(nameEl);
+  row.appendChild(bar);
+  row.appendChild(amt);
+  return row;
+}
+
+function renderExpenses() {
+  const all = state.expenses;
+  const filtered = expensesInRange();
+  const total = filtered.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+
+  els.expTotal.textContent = fmtMoney(total);
+  els.expCount.textContent = String(filtered.length);
+  els.expRangeNote.textContent = expStartFilter
+    ? `統計 ${expStartFilter} 起，共 ${filtered.length} 筆`
+    : `統計全部紀錄，共 ${filtered.length} 筆`;
+
+  // Category breakdown (share of total)
+  els.expByCat.innerHTML = '';
+  els.expByMonth.innerHTML = '';
+  if (filtered.length && total > 0) {
+    const byCat = new Map();
+    for (const e of filtered) byCat.set(e.category, (byCat.get(e.category) || 0) + (Number(e.amount) || 0));
+    const cats = [...byCat.entries()].sort((a, b) => b[1] - a[1]);
+    const catTitle = document.createElement('div');
+    catTitle.className = 'exp-block-title';
+    catTitle.textContent = '分類佔比';
+    els.expByCat.appendChild(catTitle);
+    for (const [name, amt] of cats) {
+      els.expByCat.appendChild(makeBarRow(name, amt, (amt / total) * 100, (amt / cats[0][1]) * 100));
+    }
+
+    // Monthly trend (undated grouped under 未分月, shown last)
+    const byMonth = new Map();
+    for (const e of filtered) {
+      const key = e.date ? e.date.slice(0, 7) : '未分月';
+      byMonth.set(key, (byMonth.get(key) || 0) + (Number(e.amount) || 0));
+    }
+    const months = [...byMonth.entries()].sort((a, b) => {
+      if (a[0] === '未分月') return 1;
+      if (b[0] === '未分月') return -1;
+      return a[0].localeCompare(b[0]);
+    });
+    const maxMonth = Math.max(...months.map((m) => m[1]));
+    const monTitle = document.createElement('div');
+    monTitle.className = 'exp-block-title';
+    monTitle.textContent = '每月趨勢';
+    els.expByMonth.appendChild(monTitle);
+    for (const [name, amt] of months) {
+      els.expByMonth.appendChild(makeBarRow(name, amt, null, (amt / maxMonth) * 100));
+    }
+  }
+
+  // Detail list — newest first, each row editable + deletable
+  els.expList.innerHTML = '';
+  els.expEmpty.hidden = all.length !== 0;
+  const rows = state.expenses.slice().sort((a, b) => {
+    const da = a.date || '', db = b.date || '';
+    if (da !== db) return db.localeCompare(da);
+    return (b.createdAt || '').localeCompare(a.createdAt || '');
+  });
+  for (const e of rows) els.expList.appendChild(makeExpenseRow(e));
+}
+
+function makeExpenseRow(e) {
+  const row = document.createElement('div');
+  row.className = 'exp-row';
+
+  const date = document.createElement('input');
+  date.type = 'date';
+  date.className = 'exp-date';
+  date.value = e.date || '';
+  date.addEventListener('change', () => {
+    e.date = /^\d{4}-\d{2}-\d{2}$/.test(date.value) ? date.value : '';
+    saveState();
+    renderExpenses();
+  });
+
+  const item = document.createElement('input');
+  item.type = 'text';
+  item.className = 'exp-item';
+  item.value = e.item;
+  item.placeholder = '品項';
+  item.addEventListener('change', () => {
+    e.item = item.value.trim() || e.item;
+    saveState();
+  });
+
+  const cat = document.createElement('input');
+  cat.type = 'text';
+  cat.className = 'exp-cat';
+  cat.value = e.category;
+  cat.placeholder = '分類';
+  cat.addEventListener('change', () => {
+    e.category = cat.value.trim() || '其他';
+    saveState();
+    renderExpenses();
+  });
+
+  const amount = document.createElement('input');
+  amount.type = 'number';
+  amount.className = 'exp-amount';
+  amount.inputMode = 'decimal';
+  amount.min = '0';
+  amount.value = String(e.amount);
+  amount.addEventListener('change', () => {
+    const v = Number(amount.value);
+    if (isFinite(v) && v >= 0) { e.amount = v; saveState(); }
+    else { amount.value = String(e.amount); }
+    renderExpenses();
+  });
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'exp-del';
+  del.textContent = '🗑';
+  del.title = '刪除這筆';
+  del.addEventListener('click', () => {
+    state.expenses = state.expenses.filter((x) => x.id !== e.id);
+    saveState();
+    renderExpenses();
+    render();
+  });
+
+  row.appendChild(date);
+  row.appendChild(item);
+  row.appendChild(cat);
+  row.appendChild(amount);
+  row.appendChild(del);
+  return row;
+}
+
+els.expenseBtn.addEventListener('click', openExpenses);
+els.expenseHintBtn.addEventListener('click', openExpenses);
+els.closeExpenseBtn.addEventListener('click', closeExpenses);
+els.expDoneBtn.addEventListener('click', closeExpenses);
+els.expenseModal.addEventListener('click', (e) => {
+  if (e.target === els.expenseModal) closeExpenses();
+});
+els.expStartDate.addEventListener('change', () => {
+  expStartFilter = /^\d{4}-\d{2}-\d{2}$/.test(els.expStartDate.value) ? els.expStartDate.value : '';
+  renderExpenses();
+});
+els.expStartClear.addEventListener('click', () => {
+  expStartFilter = '';
+  els.expStartDate.value = '';
+  renderExpenses();
+});
 
 /* ---------------- Settings modal ---------------- */
 function openSettings() {

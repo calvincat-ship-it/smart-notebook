@@ -373,6 +373,53 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .cloud-actions .ghost-btn { flex: 1 1 auto; justify-content: center; }
 
+/* 記帳 (bookkeeping) */
+.expense-hint {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-top: 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: .92rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.expense-hint:active { transform: scale(.995); }
+
+.exp-filter-row { display: flex; gap: 8px; }
+.exp-filter-row #expStartDate { flex: 1; }
+.exp-filter-row .ghost-btn { flex: 0 0 auto; }
+
+.exp-stat-cards { display: flex; gap: 10px; margin-top: 14px; }
+.exp-stat { flex: 1; background: var(--accent-soft); border-radius: 12px; padding: 12px 10px; text-align: center; }
+.exp-stat span { display: block; font-size: .78rem; color: var(--ink-soft); margin-bottom: 2px; }
+.exp-stat b { font-size: 1.25rem; font-variant-numeric: tabular-nums; color: var(--accent); }
+
+.exp-block { margin-top: 6px; }
+.exp-block-title { font-weight: 600; font-size: .88rem; margin: 16px 0 6px; }
+.exp-bar-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: .82rem; }
+.exp-bar-name { flex: 0 0 4.8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exp-bar { flex: 1; height: 8px; background: var(--accent-soft); border-radius: 999px; overflow: hidden; }
+.exp-bar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.exp-bar-amt { flex: 0 0 auto; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+.exp-list-head { font-weight: 600; font-size: .95rem; margin: 20px 0 8px; }
+.exp-list { display: flex; flex-direction: column; gap: 8px; }
+.exp-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: #fff;
+}
+.exp-row input { padding: 8px 10px; }
+.exp-row .exp-item { flex: 1 1 100%; font-weight: 500; }
+.exp-row .exp-date { flex: 1 1 128px; }
+.exp-row .exp-cat { flex: 1 1 72px; }
+.exp-row .exp-amount { flex: 1 1 84px; text-align: right; font-variant-numeric: tabular-nums; }
+.exp-del { flex: 0 0 auto; border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: 1rem; padding: 4px 6px; }
+
 /* Loading */
 .loading-overlay {
   position: fixed; inset: 0;

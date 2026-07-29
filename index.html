@@ -20,6 +20,7 @@
 <header class="app-header">
   <h1>智慧記事本 <span id="appVersion" class="app-version"></span></h1>
   <div class="header-actions">
+    <button id="expenseBtn" class="icon-btn" title="記帳" aria-label="記帳">💰</button>
     <button id="settingsBtn" class="icon-btn" title="設定" aria-label="設定">⚙</button>
   </div>
 </header>
@@ -45,6 +46,9 @@
     <button id="emptyAddCatBtn" class="ghost-btn">＋ 自建分類</button>
   </div>
 
+  <!-- Bookkeeping banner:消費紀錄不放首頁，收在「記帳」裡；有紀錄時提示入口 -->
+  <button id="expenseHintBtn" class="expense-hint" hidden></button>
+
   <!-- Tasks -->
   <section id="tasksSection" class="section" hidden>
     <h2 class="section-title">📌 待辦任務</h2>
@@ -63,6 +67,41 @@
     <div id="categoriesList"></div>
   </section>
 </main>
+
+<!-- Bookkeeping modal:自動歸集的消費紀錄 + 統計摘要 -->
+<div id="expenseModal" class="modal-backdrop" hidden>
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>💰 記帳</h2>
+      <button id="closeExpenseBtn" class="icon-btn" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="exp-filter">
+        <label class="field-label" for="expStartDate">統計起始日期</label>
+        <div class="exp-filter-row">
+          <input id="expStartDate" type="date">
+          <button id="expStartClear" class="ghost-btn" type="button">全部</button>
+        </div>
+        <p class="field-note" id="expRangeNote">預設統計全部紀錄。設定起始日期後，只計算該日（含）之後的消費。</p>
+      </div>
+
+      <div class="exp-stat-cards">
+        <div class="exp-stat"><span>總支出</span><b id="expTotal">NT$0</b></div>
+        <div class="exp-stat"><span>筆數</span><b id="expCount">0</b></div>
+      </div>
+
+      <div id="expByCat" class="exp-block"></div>
+      <div id="expByMonth" class="exp-block"></div>
+
+      <div class="exp-list-head">消費明細</div>
+      <div id="expList" class="exp-list"></div>
+      <p id="expEmpty" class="field-note" hidden>還沒有消費紀錄。在首頁輸入含金額的內容（例如「午餐買便當 90 元」）按「整理」，就會自動歸到這裡。</p>
+    </div>
+    <div class="modal-footer">
+      <button id="expDoneBtn" class="primary-btn">完成</button>
+    </div>
+  </div>
+</div>
 
 <!-- Settings modal -->
 <div id="settingsModal" class="modal-backdrop" hidden>
