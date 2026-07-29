@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v10.00';
+const APP_VERSION = 'v10.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1041,14 +1041,28 @@ function purgeAttachment(att) {
 // Remove note bullets by id and drop any attachment left with no surviving
 // linked bullet. This is the cascade for explicit deletes (bullet ✕, category
 // delete, completed-task delete). Callers saveState()+render() afterwards.
+function categoryBulletCount(cat) {
+  return (cat.subsections || []).reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
+}
+
 function removeBulletsByIds(ids) {
   if (!ids || !ids.length) return;
   const idSet = new Set(ids);
+  const affected = new Set();
   for (const c of state.categories) {
     for (const sub of c.subsections || []) {
+      const before = (sub.bullets || []).length;
       sub.bullets = (sub.bullets || []).filter((b) => !idSet.has(b.id));
+      if (sub.bullets.length !== before) affected.add(c);
     }
     c.subsections = (c.subsections || []).filter((sub) => (sub.bullets || []).length > 0);
+  }
+  // Auto-remove a category whose last bullet was just deleted. Only categories we
+  // actually removed a bullet from are considered — a freshly-created empty
+  // category the user made to drag into is left untouched. Claude re-creates the
+  // category by title (mergeCategories) if it later organizes content back in.
+  if (affected.size) {
+    state.categories = state.categories.filter((c) => !(affected.has(c) && categoryBulletCount(c) === 0));
   }
   const survivors = [];
   for (const att of state.attachments) {
@@ -1513,6 +1527,11 @@ function moveBullet(src, targetCat) {
   if (text == null) { render(); return; }
   tsub.bullets.push(text);
   cleanupEmptySub(src.cat, src.sub);
+  // If dragging the last bullet out emptied the source category, remove it (same
+  // rule as deleting the last bullet). The target still holds the moved bullet.
+  if (src.cat !== targetCat && categoryBulletCount(src.cat) === 0) {
+    state.categories = state.categories.filter((c) => c !== src.cat);
+  }
   saveState();
   render();
 }
