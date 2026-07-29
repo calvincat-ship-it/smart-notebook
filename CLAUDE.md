@@ -9,6 +9,5 @@
 
 ## 跨裝置交接 (HANDOFF)
 本專案在兩台機器（筆電 / 桌機，同帳號）之間接續開發。
-- **開工**：先讀根目錄 `HANDOFF.md`，掌握上一台做到哪、下一步、待決問題。
-- **收工**：更新 `HANDOFF.md`（最後更新時間/機器、做到哪、下一步、待決問題），
-  連同程式碼一起 commit + push。
+- **開工**（使用者說「開工」時）：先自動執行 `& "$env:USERPROFILE\claude-sync\_cross-device\sync-start.ps1"`（git pull 拉下另一台最新程式碼＋全域記憶），再讀根目錄 `HANDOFF.md`，掌握上一台做到哪、下一步、待決問題。
+- **收工**（使用者說「收工」時）：先更新 `HANDOFF.md`（最後更新時間/機器、做到哪、下一步、待決問題），再自動執行 `& "$env:USERPROFILE\claude-sync\_cross-device\sync-end.ps1"`（commit + push 所有專案與全域記憶，含未完成 WIP）。此為使用者預先授權的固定流程，不需再逐次確認。
