@@ -159,8 +159,10 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .drafts-head { font-size: .9rem; font-weight: 600; color: var(--ink); margin-bottom: 8px; }
 .drafts-head span { color: var(--ink-soft); font-weight: 400; }
-.drafts-list { display: flex; flex-direction: column; gap: 8px; }
-.draft-item { display: flex; gap: 8px; align-items: flex-start; }
+.drafts-list { display: flex; flex-direction: column; gap: 10px; }
+.draft-item { display: flex; flex-direction: column; gap: 6px; }
+.draft-main { display: flex; gap: 8px; align-items: flex-start; }
+.draft-files { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 2px; }
 .draft-item .draft-text {
   flex: 1 1 auto;
   width: 100%;

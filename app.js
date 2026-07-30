@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.00';
+const APP_VERSION = 'v11.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -170,15 +170,25 @@ function normalizeState(s) {
       createdAt: e.createdAt || '',
     };
   });
-  // Drafts: text stashed locally in the input card, not yet sent to Claude.
-  // Device-local scratch — kept out of the cloud bundle on purpose.
+  // Drafts: text (and optionally files) stashed locally in the input card, not
+  // yet sent to Claude. Device-local scratch — kept out of the cloud bundle on
+  // purpose. Each draft's file blobs live in IndexedDB keyed by the file ref;
+  // here we only keep the lightweight metadata.
   const drafts = (Array.isArray(s.drafts) ? s.drafts : [])
     .map((d) => ({
       id: d.id || ('df_' + genId()),
       text: typeof d.text === 'string' ? d.text : '',
       createdAt: d.createdAt || '',
+      files: (Array.isArray(d.files) ? d.files : []).map((f) => ({
+        ref: f.ref || ('a' + genId()),
+        name: f.name || '附件',
+        type: f.type || '',
+        size: f.size || 0,
+        isPdf: !!f.isPdf,
+        pdfText: typeof f.pdfText === 'string' ? f.pdfText : '',
+      })),
     }))
-    .filter((d) => d.text.trim() !== '');
+    .filter((d) => d.text.trim() !== '' || d.files.length > 0);
   return { categories: cats, tasks, attachments, expenses, drafts };
 }
 function saveState() {
@@ -673,11 +683,18 @@ async function callClaude(userInput, batchAttachments) {
     `以下是使用者這次新提供的內容，請合併整理並找出任務：\n"""\n${userInput}\n"""`;
 
   if (hasAtt) {
-    const list = batchAttachments.map((a) => `- ref="${a.ref}"：檔名「${a.name}」`).join('\n');
+    const list = batchAttachments.map((a) => {
+      let line = `- ref="${a.ref}"：檔名「${a.name}」`;
+      const ctx = (a.context || '').trim();
+      if (ctx) line += `，隨附於這段內容：「${ctx.slice(0, 200)}」`;
+      return line;
+    }).join('\n');
     userContent +=
       `\n\n使用者這次還附加了以下檔案（附件）：\n${list}\n` +
-      '請在 attachmentLinks 回傳每個附件對應到「哪幾條 bullets」：bulletTexts 要放你這次為這些內容建立（或最相關）的 bullet 文字，' +
-      '文字必須與 categories 裡的完全一致。通常一個附件對應你這次新建立的那一條 bullet。若真的無法判斷，就對應到這次新內容最主要的那一條 bullet。每個附件的 ref 都要出現在 attachmentLinks 中。';
+      '有標「隨附於這段內容」的附件，代表使用者是連同那段內容一起附上這個檔案的——' +
+      '請把它對應到你「為那段內容所建立的 bullet」，不要對應到其他段內容的 bullet。' +
+      '請在 attachmentLinks 回傳每個附件對應的 bulletTexts（放對應 bullet 的文字，需與 categories 裡完全一致）。' +
+      '沒有標示隨附內容、或真的無法判斷時，才對應到這次新內容最主要的那一條 bullet。每個附件的 ref 都要出現在 attachmentLinks 中。';
   }
 
   const body = {
@@ -721,16 +738,44 @@ async function callClaude(userInput, batchAttachments) {
 // Stash the current textarea text locally without calling Claude. Drafts pile up
 // in state.drafts; they're re-editable and deletable, and only get sent to Claude
 // (all at once) when the user presses 整理 — cutting the number of API calls.
-function stashDraft() {
+async function stashDraft() {
   if (recognizing) stopRecording();
+  if (attachedPdf && attachedPdf.reading) { toast('PDF 還在讀取中，請稍候再暫存。'); return; }
   const text = els.inputText.value.trim();
-  if (!text) { toast('沒有可暫存的文字。'); return; }
+  const hasFiles = pendingFiles.length > 0 || !!attachedPdf;
+  if (!text && !hasFiles) { toast('沒有可暫存的內容。'); return; }
+
+  // Snapshot the currently-staged files INTO this draft: persist each blob to
+  // IndexedDB (keyed by its ref) so it survives a reload, and keep only metadata
+  // on the draft. This binds each file to the draft it was stashed with.
+  const files = [];
+  try {
+    for (const f of pendingFiles) {
+      await idbPutBlob(f.ref, f.blob);
+      files.push({ ref: f.ref, name: f.name, type: f.type || '', size: f.size || 0, isPdf: false, pdfText: '' });
+    }
+    if (attachedPdf) {
+      await idbPutBlob(attachedPdf.ref, attachedPdf.blob);
+      files.push({ ref: attachedPdf.ref, name: attachedPdf.name, type: attachedPdf.type || '', size: attachedPdf.size || 0, isPdf: true, pdfText: attachedPdf.text || '' });
+    }
+  } catch (e) { toast('檔案暫存失敗：' + e.message); return; }
+
   if (!Array.isArray(state.drafts)) state.drafts = [];
-  state.drafts.push({ id: 'df_' + genId(), text, createdAt: todayStr() });
+  state.drafts.push({ id: 'df_' + genId(), text, createdAt: todayStr(), files });
   saveState();
   els.inputText.value = '';
+  clearPending();
   renderDrafts();
   toast('已暫存 ✓');
+}
+
+// Delete a draft and clean up any blobs its bound files hold in IndexedDB.
+function removeDraft(id) {
+  const d = (state.drafts || []).find((x) => x.id === id);
+  if (d) for (const f of (d.files || [])) idbDelBlob(f.ref).catch(() => {});
+  state.drafts = (state.drafts || []).filter((x) => x.id !== id);
+  saveState();
+  renderDrafts();
 }
 
 function renderDrafts() {
@@ -745,33 +790,60 @@ function renderDrafts() {
     const item = document.createElement('div');
     item.className = 'draft-item';
 
+    const main = document.createElement('div');
+    main.className = 'draft-main';
+
     const ta = document.createElement('textarea');
     ta.className = 'draft-text';
     ta.rows = 2;
     ta.value = d.text;
+    ta.placeholder = (d.files && d.files.length) ? '（僅附件，可補充說明文字…）' : '';
     ta.addEventListener('blur', () => {
       const v = ta.value.trim();
-      if (!v) { // edited to empty → remove this draft
-        state.drafts = state.drafts.filter((x) => x.id !== d.id);
-        saveState();
-        renderDrafts();
-        return;
-      }
+      // Editing to empty removes the draft only if it also has no files.
+      if (!v && (!d.files || d.files.length === 0)) { removeDraft(d.id); return; }
       if (v !== d.text) { d.text = v; saveState(); }
     });
-    item.appendChild(ta);
+    main.appendChild(ta);
 
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'draft-del';
     del.textContent = '🗑';
-    del.title = '刪除這則暫存';
-    del.addEventListener('click', () => {
-      state.drafts = state.drafts.filter((x) => x.id !== d.id);
-      saveState();
-      renderDrafts();
-    });
-    item.appendChild(del);
+    del.title = '刪除這則暫存（含其附件）';
+    del.addEventListener('click', () => removeDraft(d.id));
+    main.appendChild(del);
+
+    item.appendChild(main);
+
+    if (d.files && d.files.length) {
+      const filesRow = document.createElement('div');
+      filesRow.className = 'draft-files';
+      for (const f of d.files) {
+        const chip = document.createElement('span');
+        chip.className = 'attach-chip';
+        const label = document.createElement('span');
+        label.className = 'attach-chip-label';
+        label.textContent = `${fileIcon(f.type, f.name)} ${f.name}${f.size ? '（' + fmtSize(f.size) + '）' : ''}`;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.title = '移除此附件';
+        rm.setAttribute('aria-label', '移除');
+        rm.textContent = '✕';
+        rm.addEventListener('click', () => {
+          idbDelBlob(f.ref).catch(() => {});
+          d.files = d.files.filter((x) => x.ref !== f.ref);
+          // A draft with neither text nor files is meaningless → drop it.
+          if (!d.text.trim() && d.files.length === 0) { removeDraft(d.id); return; }
+          saveState();
+          renderDrafts();
+        });
+        chip.appendChild(label);
+        chip.appendChild(rm);
+        filesRow.appendChild(chip);
+      }
+      item.appendChild(filesRow);
+    }
 
     list.appendChild(item);
   });
@@ -780,34 +852,64 @@ function renderDrafts() {
 async function processInput() {
   if (recognizing) stopRecording();
   const typed = els.inputText.value.trim();
-  const pdfText = attachedPdf && attachedPdf.text ? attachedPdf.text : '';
-  const draftTexts = (Array.isArray(state.drafts) ? state.drafts : [])
-    .map((d) => d.text.trim()).filter(Boolean);
-  // Stashed drafts go first (older), then whatever is currently typed, then PDF.
-  const combined = [...draftTexts, typed, pdfText].filter(Boolean).join('\n\n');
-  const hasFiles = pendingFiles.length > 0 || !!attachedPdf;
+  const curPdfText = attachedPdf && attachedPdf.text ? attachedPdf.text : '';
+  const drafts = Array.isArray(state.drafts) ? state.drafts : [];
 
-  if (!combined && !hasFiles) { toast('請先輸入文字，或附加檔案。'); return; }
+  // --- Assemble the combined text (drafts first, then the current input). A
+  // stashed PDF's extracted text belongs to its draft, so fold it in there. ---
+  const textParts = [];
+  for (const d of drafts) {
+    const dPdf = (d.files || []).filter((f) => f.isPdf && f.pdfText).map((f) => f.pdfText).join('\n\n');
+    const merged = [d.text.trim(), dPdf].filter(Boolean).join('\n\n');
+    if (merged) textParts.push(merged);
+  }
+  const curText = [typed, curPdfText].filter(Boolean).join('\n\n');
+  if (curText) textParts.push(curText);
+  const combined = textParts.join('\n\n');
 
-  // Attachments-only (nothing for Claude to organize) — just stash the files.
+  // --- Assemble the file batch. Each file carries a `context` = the text it was
+  // stashed alongside, so Claude links it to the right note (not just by name).
+  // Draft files reference a blob in IndexedDB (fromDraft); current pending files
+  // carry their blob in `src`. ---
+  const batch = [];
+  for (const d of drafts) {
+    const ctx = d.text.trim();
+    for (const f of (d.files || [])) {
+      batch.push({ ref: f.ref, name: f.name, context: ctx, meta: f, isPdf: f.isPdf, fromDraft: true });
+    }
+  }
+  for (const f of pendingFiles) batch.push({ ref: f.ref, name: f.name, context: typed, src: f });
+  if (attachedPdf) batch.push({ ref: attachedPdf.ref, name: attachedPdf.name, context: typed, src: attachedPdf, isPdf: true });
+
+  if (!combined && batch.length === 0) { toast('請先輸入文字，或附加檔案。'); return; }
+
+  // Nothing for Claude to organize — just save the files to home bullets (no API
+  // call, keeping usage down), then clear drafts and the input.
   if (!combined) {
     setLoading(true);
     try {
-      await stashAttachmentsOnly();
+      for (const b of batch) {
+        if (b.isPdf && !(await confirmKeepPdf(b.name))) { if (b.fromDraft) idbDelBlob(b.ref).catch(() => {}); continue; }
+        const src = await resolveBatchSrc(b);
+        if (!src || !src.blob) { if (b.fromDraft) idbDelBlob(b.ref).catch(() => {}); continue; }
+        await createAttachment(src, [ensureHomeBullet(b.name)]);
+        if (b.fromDraft) idbDelBlob(b.ref).catch(() => {});
+      }
+      state.drafts = [];
+      saveState();
+      render();
+      els.inputText.value = '';
+      clearPending();
       toast('已附加檔案 ✓');
     } catch (err) { toast(err.message); }
     finally { setLoading(false); }
     return;
   }
 
-  // The files carried in with this input, for Claude to link to note items.
-  const batch = pendingFiles.map((f) => ({ ref: f.ref, name: f.name, src: f }));
-  if (attachedPdf) batch.push({ ref: attachedPdf.ref, name: attachedPdf.name, src: attachedPdf, isPdf: true });
-
   setLoading(true);
   try {
     const preTexts = allBulletTexts(); // snapshot before merge → detect new bullets
-    const result = await callClaude(combined, batch.map((b) => ({ ref: b.ref, name: b.name })));
+    const result = await callClaude(combined, batch.map((b) => ({ ref: b.ref, name: b.name, context: b.context })));
 
     // categories: merge Claude's full set, preserving ids of unchanged bullets
     if (Array.isArray(result.categories)) {
@@ -967,31 +1069,37 @@ function ensureHomeBullet(name) {
   return bullet.id;
 }
 
-async function saveBatchAttachments(batch, linkMap) {
-  for (const b of batch) {
-    if (b.isPdf) {
-      // Per the "keep this document?" rule: ask before retaining an uploaded PDF.
-      const keep = confirm(`要保留這份 PDF「${b.name}」作為附件嗎？\n（內容已整理完成；保留可日後從對應的筆記／任務開啟原始檔）`);
-      if (!keep) continue;
-    }
-    let linkedItemIds = (linkMap.get(b.ref) || []).slice();
-    if (linkedItemIds.length === 0) linkedItemIds = [ensureHomeBullet(b.name)];
-    await createAttachment(b.src, linkedItemIds);
-  }
+// Per the "keep this document?" rule: ask before retaining an uploaded PDF.
+function confirmKeepPdf(name) {
+  return confirm(`要保留這份 PDF「${name}」作為附件嗎？\n（內容已整理完成；保留可日後從對應的筆記／任務開啟原始檔）`);
 }
 
-async function stashAttachmentsOnly() {
-  for (const f of pendingFiles) {
-    await createAttachment(f, [ensureHomeBullet(f.name)]);
+// A batch item's blob source. Current pending files carry the blob directly;
+// draft-bound files kept only metadata, so fetch the blob from IndexedDB (where
+// it was persisted at stash time) by its ref.
+async function resolveBatchSrc(b) {
+  if (b.src && b.src.blob) return b.src;
+  const blob = await idbGetBlob(b.ref);
+  if (!blob) return null;
+  const m = b.meta || {};
+  return { blob, name: m.name || b.name, type: m.type || blob.type || '', size: m.size || blob.size || 0 };
+}
+
+async function saveBatchAttachments(batch, linkMap) {
+  for (const b of batch) {
+    if (b.isPdf && !confirmKeepPdf(b.name)) {
+      if (b.fromDraft) idbDelBlob(b.ref).catch(() => {});
+      continue;
+    }
+    const src = await resolveBatchSrc(b);
+    if (!src || !src.blob) { if (b.fromDraft) idbDelBlob(b.ref).catch(() => {}); continue; }
+    let linkedItemIds = (linkMap.get(b.ref) || []).slice();
+    if (linkedItemIds.length === 0) linkedItemIds = [ensureHomeBullet(b.name)];
+    await createAttachment(src, linkedItemIds);
+    // The temp draft blob (keyed by ref) is now redundant — createAttachment
+    // re-stored the blob under the attachment's own id.
+    if (b.fromDraft) idbDelBlob(b.ref).catch(() => {});
   }
-  if (attachedPdf) {
-    const keep = confirm(`要保留這份 PDF「${attachedPdf.name}」作為附件嗎？`);
-    if (keep) await createAttachment(attachedPdf, [ensureHomeBullet(attachedPdf.name)]);
-  }
-  saveState();
-  render();
-  els.inputText.value = '';
-  clearPending();
 }
 
 // Persist one file: blob → IndexedDB now; the debounced cloud backup (triggered

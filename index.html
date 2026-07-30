@@ -39,15 +39,15 @@
     <div id="pendingAttach" class="pending-attach" hidden></div>
     <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
     <div class="input-actions">
-      <button id="stashBtn" class="ghost-btn" type="button" title="先存到本機，之後一次整理">📥 暫存</button>
+      <button id="stashBtn" class="ghost-btn" type="button" title="先存到本機（含附加的檔案），之後一次整理">📥 暫存</button>
       <button id="processBtn" class="primary-btn">整理</button>
     </div>
 
-    <!-- 暫存區:內容先存本機,可再編輯/新增/刪除;按「整理」時才一起送 Claude(省用量) -->
+    <!-- 暫存區:內容(含附件)先存本機,可再編輯/新增/刪除;按「整理」時才一起送 Claude(省用量) -->
     <div id="draftsBox" class="drafts-box" hidden>
       <div class="drafts-head">📥 暫存區 <span id="draftsCount"></span></div>
       <div id="draftsList" class="drafts-list"></div>
-      <p class="field-note">這些內容只存在本機、還沒送給 Claude。按「整理」時會與上方輸入一起送出、一次處理，減少 API 用量。</p>
+      <p class="field-note">這些內容（含各則附加的檔案）只存在本機、還沒送給 Claude。按「整理」時會全部一起送出、一次處理，減少 API 用量；每個檔案會跟著它所屬的那一則內容對應，不會混到別則。</p>
     </div>
   </section>
 
