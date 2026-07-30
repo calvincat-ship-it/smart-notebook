@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v12.02';
+const APP_VERSION = 'v12.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -2329,6 +2329,14 @@ async function cloudAutoSync(opts) {
   if (cloudSyncing && !opts.manual) return 'busy';
   cloudSyncing = true;
   try {
+    // Auto-sync stays silent. A MANUAL sync is a user gesture, so if a silent
+    // token can't be issued (session expired / third-party cookies blocked) we
+    // fall back to an interactive prompt — that's how the button recovers the
+    // "Google 授權未完成" state without making the user re-connect in 設定.
+    if (opts.manual) {
+      try { await getAccessToken('none'); }
+      catch (e) { gisToken = null; await getAccessToken(''); }
+    }
     const remote = await driveFindFile(CLOUD_FILENAME, 'none');
     if (!remote) {
       // Nothing in the cloud yet — create it from this device.
@@ -2380,7 +2388,12 @@ async function cloudAutoSync(opts) {
     if (opts.manual) toast('已同步雲端最新資料 ✓'); else toast('已自動同步其他裝置的更新 ✓');
     return 'downloaded';
   } catch (e) {
-    if (opts.manual) toast('同步失敗：' + (e.message || e));
+    if (opts.manual) {
+      const msg = (e && e.message) || String(e);
+      toast(/授權|token|401|403/i.test(msg)
+        ? '同步失敗：Google 授權已失效。請在彈出的視窗完成授權，或到設定重新連結帳號。'
+        : '同步失敗：' + msg);
+    }
     return 'error';
   } finally {
     cloudSyncing = false;
