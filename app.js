@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v12.00';
+const APP_VERSION = 'v12.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -87,7 +87,10 @@ const idbClearBlobs = () => idbTx('readwrite', (s) => s.clear());
 let gisToken = null;      // access token, never persisted
 let tokenClient = null;   // GIS token client
 let cloudTimer = null;    // debounce handle for auto-backup
+let cloudPollTimer = null; // interval handle for auto pull/push while app is open
+let cloudSyncing = false; // guard so overlapping auto-syncs don't run concurrently
 let suppressCloud = false; // true while applying a restore, to avoid backup loop
+const CLOUD_POLL_MS = 20000; // how often to check the cloud for changes while open
 
 function loadState() {
   try {
@@ -251,6 +254,8 @@ function loadCloudState() {
     enabled: !!c.enabled,
     fileId: c.fileId || '',
     lastSyncedAt: c.lastSyncedAt || '', // ISO of the bundle we last uploaded/restored
+    lastEditAt: c.lastEditAt || '',     // ISO of the most recent LOCAL data edit (for latest-wins)
+    lastSeenModifiedTime: c.lastSeenModifiedTime || '', // Drive file modifiedTime we've already processed
     email: c.email || '',
     deviceId: c.deviceId || 'dev_' + Math.random().toString(36).slice(2, 10),
     pendingBackup: !!c.pendingBackup,
@@ -272,6 +277,7 @@ const els = {
   pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
   addInputBtn: $('addInputBtn'),
+  syncBtn: $('syncBtn'),
   inputModal: $('inputModal'),
   closeInputBtn: $('closeInputBtn'),
   attachHelpBtn: $('attachHelpBtn'),
@@ -2009,8 +2015,8 @@ async function driveUpload(fileId, name, obj) {
     JSON.stringify(obj) +
     `\r\n--${boundary}--`;
   const url = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id`
-    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`;
+    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id,modifiedTime`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime`;
   const res = await driveFetch(url, {
     method: fileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
@@ -2106,6 +2112,7 @@ function applyBundle(b) {
 function scheduleCloudBackup() {
   if (!cloudState.enabled || suppressCloud) return;
   cloudState.pendingBackup = true;
+  cloudState.lastEditAt = new Date().toISOString(); // marks how fresh the local data is
   saveCloudState();
   clearTimeout(cloudTimer);
   cloudTimer = setTimeout(() => cloudBackupNow({}), 6000);
@@ -2121,6 +2128,8 @@ async function cloudBackupNow(opts) {
     const saved = await driveUpload(cloudState.fileId, CLOUD_FILENAME, bundle);
     cloudState.fileId = saved.id;
     cloudState.lastSyncedAt = bundle.updatedAt;
+    cloudState.lastEditAt = bundle.updatedAt; // local is now fully reflected in the cloud
+    if (saved.modifiedTime) cloudState.lastSeenModifiedTime = saved.modifiedTime; // don't re-download our own write
     cloudState.pendingBackup = false;
     cloudState.backupFailed = false;
     saveCloudState();
@@ -2157,6 +2166,8 @@ async function cloudConnect() {
       if (useCloud) {
         applyBundle(bundle);
         cloudState.lastSyncedAt = bundle.updatedAt || new Date().toISOString();
+        cloudState.lastEditAt = cloudState.lastSyncedAt;
+        if (remote.modifiedTime) cloudState.lastSeenModifiedTime = remote.modifiedTime;
         cloudState.pendingBackup = false;
         cloudState.backupFailed = false;
         saveCloudState();
@@ -2171,6 +2182,7 @@ async function cloudConnect() {
       toast('已連結並建立雲端備份 ✓');
     }
     updateCloudUI();
+    startCloudPoll();
   } catch (e) {
     toast('連結失敗：' + (e.message || e));
   } finally {
@@ -2189,6 +2201,8 @@ async function cloudRestore() {
     applyBundle(bundle);
     cloudState.fileId = remote.id;
     cloudState.lastSyncedAt = bundle.updatedAt || new Date().toISOString();
+    cloudState.lastEditAt = cloudState.lastSyncedAt;
+    if (remote.modifiedTime) cloudState.lastSeenModifiedTime = remote.modifiedTime;
     cloudState.pendingBackup = false;
     cloudState.backupFailed = false;
     saveCloudState();
@@ -2203,9 +2217,12 @@ async function cloudRestore() {
 
 function cloudDisconnect() {
   if (!confirm('解除與 Google 的連結？（雲端上的備份會保留，只是這台不再自動同步）')) return;
+  stopCloudPoll();
   cloudState.enabled = false;
   cloudState.fileId = '';
   cloudState.lastSyncedAt = '';
+  cloudState.lastEditAt = '';
+  cloudState.lastSeenModifiedTime = '';
   cloudState.pendingBackup = false;
   cloudState.backupFailed = false;
   gisToken = null;
@@ -2264,17 +2281,21 @@ async function cloudSwitchAccount() {
       cloudState.fileId = remote.id;
       applyBundle(bundle);
       cloudState.lastSyncedAt = bundle.updatedAt || new Date().toISOString();
+      cloudState.lastEditAt = cloudState.lastSyncedAt;
+      if (remote.modifiedTime) cloudState.lastSeenModifiedTime = remote.modifiedTime;
       cloudState.pendingBackup = false;
       cloudState.backupFailed = false;
       saveCloudState();
       toast('已更換帳號並從雲端還原 ✓');
     } else {
+      cloudState.lastSeenModifiedTime = '';
       saveCloudState();
       render();
       await cloudBackupNow({}); // seed an (empty) backup file for the new account
       toast('已更換帳號（新帳號無雲端備份，保持空白）✓');
     }
     updateCloudUI();
+    startCloudPoll();
   } catch (e) {
     // A failure can happen either before the wipe (sign-in cancelled → nothing
     // lost) or after (local cleared, new account connected). Reflect real state.
@@ -2286,32 +2307,97 @@ async function cloudSwitchAccount() {
   }
 }
 
-// On open / return-to-foreground: if another device uploaded a newer bundle,
-// prompt before overwriting this device. Silent token (no popup) — if there's no
-// active Google session it just skips until the next manual action.
-async function cloudCheckOnOpen() {
-  if (!cloudState.enabled || !GOOGLE_CLIENT_ID) return;
+// Is the user actively typing/editing right now? Used to avoid yanking data out
+// from under them when an auto-download would re-render the page.
+function isEditingNow() {
+  const a = document.activeElement;
+  if (!a) return false;
+  const tag = a.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || a.isContentEditable;
+}
+
+// The heart of automatic sync. Runs on load, on foreground, on a timer while the
+// app is open, and from the header 🔄 button. It:
+//   1. cheaply checks the cloud file's modifiedTime,
+//   2. if the cloud changed, downloads it and applies it when it's newer than the
+//      local data (latest-wins, no prompt) — unless the user is mid-edit,
+//   3. otherwise pushes any pending local changes up.
+// Silent by default (opts.manual → show a toast with the outcome).
+async function cloudAutoSync(opts) {
+  opts = opts || {};
+  if (!cloudState.enabled || !GOOGLE_CLIENT_ID) return 'off';
+  if (cloudSyncing && !opts.manual) return 'busy';
+  cloudSyncing = true;
   try {
     const remote = await driveFindFile(CLOUD_FILENAME, 'none');
-    if (remote) {
-      const bundle = await driveDownload(remote.id);
-      cloudState.fileId = remote.id;
-      const newer = bundle.updatedAt && (!cloudState.lastSyncedAt || new Date(bundle.updatedAt) > new Date(cloudState.lastSyncedAt));
-      const fromOtherDevice = bundle.deviceId !== cloudState.deviceId;
-      if (newer && fromOtherDevice) {
-        if (confirm('雲端有更新的版本（可能來自其他裝置）。\n要用雲端版本覆蓋這台裝置嗎？')) {
-          applyBundle(bundle);
-          cloudState.lastSyncedAt = bundle.updatedAt;
-          cloudState.pendingBackup = false;
-          cloudState.backupFailed = false;
-          saveCloudState();
-          updateCloudUI();
-          return;
-        }
-      }
+    if (!remote) {
+      // Nothing in the cloud yet — create it from this device.
+      if (cloudState.pendingBackup || cloudState.backupFailed || opts.manual) await cloudBackupNow(opts.manual ? { manual: true } : {});
+      return 'nocloud';
     }
-    if (cloudState.pendingBackup || cloudState.backupFailed) await cloudBackupNow({});
-  } catch (e) { /* silent — no session / offline */ }
+    cloudState.fileId = remote.id;
+    const cloudChanged = remote.modifiedTime && remote.modifiedTime !== cloudState.lastSeenModifiedTime;
+
+    if (!cloudChanged) {
+      // Cloud is exactly what we last saw. Just push local changes if any.
+      if (cloudState.pendingBackup || cloudState.backupFailed) { await cloudBackupNow(opts.manual ? { manual: true } : {}); return 'uploaded'; }
+      if (opts.manual) toast('已是最新，無需同步 ✓');
+      return 'insync';
+    }
+
+    // Cloud changed since we last processed it — fetch it and decide direction.
+    const bundle = await driveDownload(remote.id);
+    const fromOther = bundle.deviceId !== cloudState.deviceId;
+    const remoteTime = bundle.updatedAt ? new Date(bundle.updatedAt).getTime() : 0;
+    const localTime = new Date(cloudState.lastEditAt || cloudState.lastSyncedAt || 0).getTime();
+
+    if (!fromOther) {
+      // It's our own upload we simply hadn't recorded — adopt the marker, no loop.
+      cloudState.lastSeenModifiedTime = remote.modifiedTime;
+      if (bundle.updatedAt) cloudState.lastSyncedAt = bundle.updatedAt;
+      saveCloudState();
+      if (cloudState.pendingBackup || cloudState.backupFailed) { await cloudBackupNow(opts.manual ? { manual: true } : {}); return 'uploaded'; }
+      if (opts.manual) toast('已是最新，無需同步 ✓');
+      return 'insync';
+    }
+
+    // Cloud has data from ANOTHER device. Latest-wins: apply it unless our local
+    // edits are newer (then upload ours instead).
+    const localIsNewer = cloudState.pendingBackup && localTime > remoteTime;
+    if (localIsNewer) {
+      await cloudBackupNow(opts.manual ? { manual: true } : {});
+      return 'uploaded';
+    }
+    if (isEditingNow() && !opts.manual) return 'deferred'; // don't disrupt active typing; try next cycle
+    applyBundle(bundle);
+    cloudState.lastSyncedAt = bundle.updatedAt || new Date().toISOString();
+    cloudState.lastEditAt = cloudState.lastSyncedAt;
+    cloudState.lastSeenModifiedTime = remote.modifiedTime;
+    cloudState.pendingBackup = false;
+    cloudState.backupFailed = false;
+    saveCloudState();
+    updateCloudUI();
+    if (opts.manual) toast('已同步雲端最新資料 ✓'); else toast('已自動同步其他裝置的更新 ✓');
+    return 'downloaded';
+  } catch (e) {
+    if (opts.manual) toast('同步失敗：' + (e.message || e));
+    return 'error';
+  } finally {
+    cloudSyncing = false;
+  }
+}
+// Kept as the name used at load/foreground; now just the auto-sync entry point.
+function cloudCheckOnOpen() { return cloudAutoSync({}); }
+
+function startCloudPoll() {
+  stopCloudPoll();
+  if (!cloudState.enabled || !GOOGLE_CLIENT_ID) return;
+  cloudPollTimer = setInterval(() => {
+    if (!document.hidden) cloudAutoSync({});
+  }, CLOUD_POLL_MS);
+}
+function stopCloudPoll() {
+  if (cloudPollTimer) { clearInterval(cloudPollTimer); cloudPollTimer = null; }
 }
 
 function fmtSyncTime(iso) {
@@ -2331,6 +2417,8 @@ function setCloudBusy(on) {
 function updateCloudUI() {
   const configured = !!GOOGLE_CLIENT_ID;
   els.cloudSection.hidden = !configured;
+  // Header 🔄 手動同步 button: only useful once connected.
+  if (els.syncBtn) els.syncBtn.hidden = !(configured && cloudState.enabled);
   if (!configured) return;
   const on = cloudState.enabled;
   els.cloudDisconnected.hidden = on;
@@ -2338,10 +2426,10 @@ function updateCloudUI() {
   els.cloudStatus.classList.remove('cloud-warn');
   if (on) {
     let s;
-    if (cloudState.backupFailed) { s = '⚠ 有變更尚未成功備份，請按「立即備份」。'; els.cloudStatus.classList.add('cloud-warn'); }
-    else if (cloudState.pendingBackup) s = '有變更待備份…';
-    else if (cloudState.lastSyncedAt) s = '上次同步：' + fmtSyncTime(cloudState.lastSyncedAt);
-    else s = '已連結。';
+    if (cloudState.backupFailed) { s = '⚠ 有變更尚未成功備份，請按「立即備份」或「🔄 同步」。'; els.cloudStatus.classList.add('cloud-warn'); }
+    else if (cloudState.pendingBackup) s = '有變更待備份…（自動同步中）';
+    else if (cloudState.lastSyncedAt) s = '自動同步已開啟。上次同步：' + fmtSyncTime(cloudState.lastSyncedAt);
+    else s = '已連結，自動同步已開啟。';
     if (cloudState.email) s += `\n帳號：${cloudState.email}`;
     els.cloudStatus.textContent = s;
   }
@@ -2549,6 +2637,14 @@ if (els.inputModal) els.inputModal.addEventListener('click', (e) => {
 });
 { const b = $('emptyAddInputBtn'); if (b) b.addEventListener('click', openInputModal); }
 
+// Header 🔄 手動同步 — compare with cloud and sync to whichever is newest.
+if (els.syncBtn) els.syncBtn.addEventListener('click', async () => {
+  els.syncBtn.disabled = true;
+  els.syncBtn.classList.add('spinning');
+  try { await cloudAutoSync({ manual: true }); }
+  finally { els.syncBtn.disabled = false; els.syncBtn.classList.remove('spinning'); }
+});
+
 // Attachment help modal
 if (els.attachHelpBtn) els.attachHelpBtn.addEventListener('click', openAttachHelp);
 if (els.closeAttachHelpBtn) els.closeAttachHelpBtn.addEventListener('click', closeAttachHelp);
@@ -2664,15 +2760,21 @@ if (appVersionEl) appVersionEl.textContent = APP_VERSION;
 
 pruneCompletedTasks();
 render();
-cloudCheckOnOpen();
+updateCloudUI();
+cloudAutoSync({});   // pull newer data / push pending on startup
+startCloudPoll();    // then keep checking every CLOUD_POLL_MS while the app is open
 
-// Re-check when the app is reopened / brought back to the foreground, so cards
-// that have aged past the threshold get cleaned up without a manual reload.
+// On foreground: prune, re-check the cloud immediately, and resume polling.
+// On background: pause polling and flush any pending backup (best-effort).
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     pruneCompletedTasks();
     render();
-    cloudCheckOnOpen();
+    cloudAutoSync({});
+    startCloudPoll();
+  } else {
+    stopCloudPoll();
+    if (cloudState.enabled && (cloudState.pendingBackup || cloudState.backupFailed)) cloudBackupNow({});
   }
 });
 

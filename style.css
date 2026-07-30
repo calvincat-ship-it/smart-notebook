@@ -55,6 +55,8 @@ body {
 }
 .icon-btn:active { transform: scale(.94); }
 .add-input-btn { background: #fff; color: var(--accent); }
+.icon-btn.spinning { animation: icon-spin .8s linear infinite; }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
 
 main { padding: 16px; max-width: 720px; margin: 0 auto; }
 
