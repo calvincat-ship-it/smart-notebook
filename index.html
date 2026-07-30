@@ -20,41 +20,19 @@
 <header class="app-header">
   <h1>智慧記事本 <span id="appVersion" class="app-version"></span></h1>
   <div class="header-actions">
+    <button id="addInputBtn" class="icon-btn add-input-btn" title="新增記事" aria-label="新增記事">✏️</button>
     <button id="expenseBtn" class="icon-btn" title="記帳" aria-label="記帳">💰</button>
     <button id="settingsBtn" class="icon-btn" title="設定" aria-label="設定">⚙</button>
   </div>
 </header>
 
 <main>
-  <!-- Input card -->
-  <section class="card input-card">
-    <textarea id="inputText" rows="5" placeholder="在這裡打字或語音口述，可再附加相關檔案…&#10;例如：週一下午開部門會議，確認 Q3 預算，8/15 前要交評鑑資料。"></textarea>
-    <div class="input-tools">
-      <button id="micBtn" class="ghost-btn" type="button" title="語音輸入" hidden>🎤 語音</button>
-      <label class="ghost-btn" for="attachInput">📎 附加檔案</label>
-      <input id="attachInput" type="file" multiple hidden>
-      <label class="ghost-btn" for="pdfInput">📄 上傳 PDF</label>
-      <input id="pdfInput" type="file" accept="application/pdf" hidden>
-    </div>
-    <p class="field-note attach-note">附加檔案：任何格式、單檔上限 10MB、Claude 不讀內容；上傳 PDF：抽取文字來整理。<button id="attachHelpBtn" type="button" class="link-btn">ℹ️ 附件說明</button></p>
-    <div id="pendingAttach" class="pending-attach" hidden></div>
-    <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
-    <div class="input-actions">
-      <button id="stashBtn" class="ghost-btn" type="button" title="先存到本機（含附加的檔案），之後一次整理">📥 暫存</button>
-      <button id="processBtn" class="primary-btn">整理</button>
-    </div>
-
-    <!-- 暫存區:內容(含附件)先存本機,可再編輯/新增/刪除;按「整理」時才一起送 Claude(省用量) -->
-    <div id="draftsBox" class="drafts-box" hidden>
-      <div class="drafts-head">📥 暫存區 <span id="draftsCount"></span></div>
-      <div id="draftsList" class="drafts-list"></div>
-      <p class="field-note">這些內容（含各則附加的檔案）只存在本機、還沒送給 Claude。按「整理」時會全部一起送出、一次處理，減少 API 用量；每個檔案會跟著它所屬的那一則內容對應，不會混到別則。</p>
-    </div>
-  </section>
-
   <div id="emptyHint" class="empty-hint">
-    <p>還沒有內容。輸入一些文字或 PDF，按「整理」，Claude 會自動分類並找出待辦。</p>
-    <button id="emptyAddCatBtn" class="ghost-btn">＋ 自建分類</button>
+    <p>還沒有內容。點右上角 <b>✏️ 新增記事</b>，輸入文字或檔案後按「整理」，Claude 會自動分類並找出待辦。</p>
+    <div class="empty-actions">
+      <button id="emptyAddInputBtn" class="primary-btn">✏️ 新增記事</button>
+      <button id="emptyAddCatBtn" class="ghost-btn">＋ 自建分類</button>
+    </div>
   </div>
 
   <!-- Bookkeeping banner:消費紀錄不放首頁，收在「記帳」裡；有紀錄時提示入口 -->
@@ -78,6 +56,42 @@
     <div id="categoriesList"></div>
   </section>
 </main>
+
+<!-- Input modal:新增記事（含暫存資料區），由標題列 ✏️ 開啟 -->
+<div id="inputModal" class="modal-backdrop" hidden>
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>✏️ 新增記事</h2>
+      <button id="closeInputBtn" class="icon-btn" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="input-card">
+        <textarea id="inputText" rows="5" placeholder="在這裡打字或語音口述，可再附加相關檔案…&#10;例如：週一下午開部門會議，確認 Q3 預算，8/15 前要交評鑑資料。"></textarea>
+        <div class="input-tools">
+          <button id="micBtn" class="ghost-btn" type="button" title="語音輸入" hidden>🎤 語音</button>
+          <label class="ghost-btn" for="attachInput">📎 附加檔案</label>
+          <input id="attachInput" type="file" multiple hidden>
+          <label class="ghost-btn" for="pdfInput">📄 上傳 PDF</label>
+          <input id="pdfInput" type="file" accept="application/pdf" hidden>
+        </div>
+        <p class="field-note attach-note">附加檔案：任何格式、單檔上限 10MB、Claude 不讀內容；上傳 PDF：抽取文字來整理。<button id="attachHelpBtn" type="button" class="link-btn">ℹ️ 附件說明</button></p>
+        <div id="pendingAttach" class="pending-attach" hidden></div>
+        <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
+        <div class="input-actions">
+          <button id="stashBtn" class="ghost-btn" type="button" title="先存到本機（含附加的檔案），之後一次整理">📥 暫存</button>
+          <button id="processBtn" class="primary-btn">整理</button>
+        </div>
+
+        <!-- 暫存區:內容(含附件)先存本機,可再編輯/新增/刪除;按「整理」時才一起送 Claude(省用量) -->
+        <div id="draftsBox" class="drafts-box" hidden>
+          <div class="drafts-head">📥 暫存區 <span id="draftsCount"></span></div>
+          <div id="draftsList" class="drafts-list"></div>
+          <p class="field-note">這些內容（含各則附加的檔案）只存在本機、還沒送給 Claude。按「整理」時會全部一起送出、一次處理，減少 API 用量；每個檔案會跟著它所屬的那一則內容對應，不會混到別則。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Bookkeeping modal:自動歸集的消費紀錄 + 統計摘要 -->
 <div id="expenseModal" class="modal-backdrop" hidden>

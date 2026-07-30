@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.06';
+const APP_VERSION = 'v12.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -44,6 +44,10 @@ let cloudState = loadCloudState();
 let pendingFiles = [];       // [{ ref, name, type, size, blob }] from 📎 附加檔案 (kept as attachments)
 let attachedPdf = null;      // { ref, name, type, size, blob, text } from 📄 上傳 PDF (text-extracted; kept only if user confirms)
 let pendingFocus = null;     // category index whose newly-added item should get focus
+// Collapse/expand UI state (session-only, not persisted). Categories default to
+// collapsed; tasks of tier 普通/可暫緩 default to collapsed (緊急 always expanded).
+const expandedCats = new WeakSet();  // category objects the user has expanded
+const expandedTasks = new Set();     // task ids the user has expanded
 
 /* ---------------- Attachment blob store (IndexedDB) ---------------- */
 // localStorage can't hold binary; blobs are cached here keyed by attachment id.
@@ -267,6 +271,9 @@ const els = {
   attachInput: $('attachInput'),
   pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
+  addInputBtn: $('addInputBtn'),
+  inputModal: $('inputModal'),
+  closeInputBtn: $('closeInputBtn'),
   attachHelpBtn: $('attachHelpBtn'),
   attachHelpModal: $('attachHelpModal'),
   closeAttachHelpBtn: $('closeAttachHelpBtn'),
@@ -907,6 +914,7 @@ async function processInput() {
       render();
       els.inputText.value = '';
       clearPending();
+      closeInputModal();
       toast('已附加檔案 ✓');
     } catch (err) { toast(err.message); }
     finally { setLoading(false); }
@@ -938,6 +946,7 @@ async function processInput() {
     render();
     els.inputText.value = '';
     clearPending();
+    closeInputModal();
     toast('整理完成 ✓');
   } catch (err) {
     toast(err.message);
@@ -1449,7 +1458,11 @@ function renderTasks() {
   for (const { t, p } of withPri) {
     const meta = TIER_META[p.tier];
     const item = document.createElement('div');
-    item.className = 'task-item ' + meta.cls + (t.done ? ' done' : '');
+    // 普通 / 可暫緩 cards collapse to just the badge + title; 緊急 stays open.
+    const collapsible = p.tier !== 'urgent';
+    const expanded = !collapsible || expandedTasks.has(t.id);
+    item.className = 'task-item ' + meta.cls + (t.done ? ' done' : '')
+      + (collapsible ? ' collapsible' : '') + (collapsible && !expanded ? ' collapsed' : '');
 
     const check = document.createElement('div');
     check.className = 'task-check';
@@ -1507,10 +1520,25 @@ function renderTasks() {
       mk.title = '此任務的緊急程度為手動設定';
       badgeRow.appendChild(mk);
     }
+    if (collapsible) {
+      const car = document.createElement('span');
+      car.className = 'task-caret';
+      car.textContent = expanded ? '▾' : '▸';
+      badgeRow.appendChild(car);
+    }
 
     const text = document.createElement('div');
     text.className = 'task-text';
     text.textContent = t.task;
+
+    // Tapping the card (but not its interactive controls) expands/collapses.
+    if (collapsible) {
+      main.addEventListener('click', (e) => {
+        if (e.target.closest('.pri-select, .pri-manual-mark, .cal-btn, .attach-chip, a, input, button, select, [contenteditable]')) return;
+        if (expandedTasks.has(t.id)) expandedTasks.delete(t.id); else expandedTasks.add(t.id);
+        renderTasks();
+      });
+    }
 
     const metaRow = document.createElement('div');
     metaRow.className = 'task-meta';
@@ -1573,15 +1601,17 @@ function renderTasks() {
 
     main.appendChild(badgeRow);
     main.appendChild(text);
-    main.appendChild(metaRow);
+    if (expanded) {
+      main.appendChild(metaRow);
 
-    // Attachments that belong to this task's note items — openable right here.
-    const atts = attachmentsForItems(t.linkedItemIds);
-    if (atts.length) {
-      const attRow = document.createElement('div');
-      attRow.className = 'attach-row';
-      for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
-      main.appendChild(attRow);
+      // Attachments that belong to this task's note items — openable right here.
+      const atts = attachmentsForItems(t.linkedItemIds);
+      if (atts.length) {
+        const attRow = document.createElement('div');
+        attRow.className = 'attach-row';
+        for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+        main.appendChild(attRow);
+      }
     }
 
     const del = document.createElement('button');
@@ -1603,12 +1633,19 @@ function renderCategories(orphans) {
   els.categoriesList.innerHTML = '';
 
   state.categories.forEach((cat, ci) => {
+    const expanded = expandedCats.has(cat);
     const card = document.createElement('div');
-    card.className = 'category';
+    card.className = 'category' + (expanded ? ' expanded' : '');
     card.dataset.ci = ci;
+
+    const subs = cat.subsections || [];
+    const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
 
     const head = document.createElement('div');
     head.className = 'category-head';
+    const caret = document.createElement('span');
+    caret.className = 'cat-caret';
+    caret.textContent = '▸';
     const title = document.createElement('input');
     title.className = 'category-title';
     title.value = cat.title || '未命名分類';
@@ -1616,24 +1653,34 @@ function renderCategories(orphans) {
       cat.title = title.value.trim() || '未命名分類';
       saveState();
     });
+    const count = document.createElement('span');
+    count.className = 'cat-count';
+    count.textContent = totalBullets ? `${totalBullets} 項` : '空';
     const catDel = document.createElement('button');
     catDel.className = 'cat-del';
     catDel.textContent = '🗑';
     catDel.title = '刪除整個分類';
-    catDel.addEventListener('click', () => {
+    catDel.addEventListener('click', (e) => {
+      e.stopPropagation();
       if (!confirm(`刪除分類「${cat.title}」？裡面的項目也會一併刪除。`)) return;
       state.categories.splice(ci, 1);
       saveState();
       render();
     });
+    // Tap the head to expand/collapse — except when editing the title.
+    head.addEventListener('click', (e) => {
+      if (e.target === title) return;
+      if (expandedCats.has(cat)) expandedCats.delete(cat); else expandedCats.add(cat);
+      renderCategories();
+    });
+    head.appendChild(caret);
     head.appendChild(title);
+    head.appendChild(count);
     head.appendChild(catDel);
 
     const bodyEl = document.createElement('div');
     bodyEl.className = 'category-body';
-
-    const subs = cat.subsections || [];
-    const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
+    bodyEl.hidden = !expanded;
     if (totalBullets === 0) {
       const hint = document.createElement('div');
       hint.className = 'cat-empty-hint';
@@ -1771,6 +1818,7 @@ function cleanupEmptySub(cat, sub) {
   }
 }
 function addItem(cat) {
+  expandedCats.add(cat); // keep it open so the new (focused) item is visible
   const s = getGeneralSub(cat);
   s.bullets.push({ id: genId(), text: '' });
   pendingFocus = state.categories.indexOf(cat);
@@ -1780,6 +1828,7 @@ function addItem(cat) {
 function addCategory() {
   const cat = { title: '新分類', subsections: [] };
   state.categories.push(cat);
+  expandedCats.add(cat); // open it so the user can add items right away
   saveState();
   render();
   const card = els.categoriesList.querySelector(`.category[data-ci="${state.categories.length - 1}"]`);
@@ -1840,6 +1889,7 @@ function moveBullet(src, targetCat) {
   const text = src.sub.bullets.splice(src.bi, 1)[0];
   if (text == null) { render(); return; }
   tsub.bullets.push(text);
+  expandedCats.add(targetCat); // reveal where the item landed
   cleanupEmptySub(src.cat, src.sub);
   // If dragging the last bullet out emptied the source category, remove it (same
   // rule as deleting the last bullet). The target still holds the moved bullet.
@@ -2324,6 +2374,19 @@ function closeExpenses() { els.expenseModal.hidden = true; }
 function openAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = false; }
 function closeAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = true; }
 
+// Input modal (新增記事) — the input card + drafts area now live here, opened
+// from the header ✏️ button so the homepage shows only tasks and categories.
+function openInputModal() {
+  if (!els.inputModal) return;
+  renderDrafts();
+  els.inputModal.hidden = false;
+  setTimeout(() => { if (els.inputText) els.inputText.focus(); }, 50);
+}
+function closeInputModal() {
+  if (recognizing) stopRecording();
+  if (els.inputModal) els.inputModal.hidden = true;
+}
+
 function makeBarRow(name, amount, pct, barPct) {
   const row = document.createElement('div');
   row.className = 'exp-bar-row';
@@ -2477,6 +2540,14 @@ els.expDoneBtn.addEventListener('click', closeExpenses);
 els.expenseModal.addEventListener('click', (e) => {
   if (e.target === els.expenseModal) closeExpenses();
 });
+
+// Input modal (新增記事)
+if (els.addInputBtn) els.addInputBtn.addEventListener('click', openInputModal);
+if (els.closeInputBtn) els.closeInputBtn.addEventListener('click', closeInputModal);
+if (els.inputModal) els.inputModal.addEventListener('click', (e) => {
+  if (e.target === els.inputModal) closeInputModal();
+});
+{ const b = $('emptyAddInputBtn'); if (b) b.addEventListener('click', openInputModal); }
 
 // Attachment help modal
 if (els.attachHelpBtn) els.attachHelpBtn.addEventListener('click', openAttachHelp);
