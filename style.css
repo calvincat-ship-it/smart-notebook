@@ -282,6 +282,14 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .task-del { border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: 1rem; padding: 0 4px; }
 .task-attach-btn { font-family: inherit; line-height: 1.4; }
+.task-attach-help { font-family: inherit; line-height: 1.4; padding: 3px 7px; }
+
+/* Attachment-help modal text */
+.help-h { font-size: .9rem; font-weight: 700; color: var(--ink); margin: 14px 0 4px; }
+.help-h:first-child { margin-top: 0; }
+.help-p { font-size: .86rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+.attach-note { margin-top: 8px; }
+.attach-note .link-btn { margin-left: 4px; }
 
 /* Categories */
 .category {

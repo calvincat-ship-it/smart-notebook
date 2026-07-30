@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.03';
+const APP_VERSION = 'v11.04';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -267,6 +267,10 @@ const els = {
   attachInput: $('attachInput'),
   pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
+  attachHelpBtn: $('attachHelpBtn'),
+  attachHelpModal: $('attachHelpModal'),
+  closeAttachHelpBtn: $('closeAttachHelpBtn'),
+  attachHelpDoneBtn: $('attachHelpDoneBtn'),
   stashBtn: $('stashBtn'),
   draftsBox: $('draftsBox'),
   draftsList: $('draftsList'),
@@ -1510,6 +1514,14 @@ function renderTasks() {
     attachBtn.type = 'button';
     attachBtn.className = 'cal-btn task-attach-btn';
     attachBtn.textContent = '📎 附加檔案';
+    attachBtn.title = '任何格式、單檔上限 10MB，原樣保留（Claude 不讀內容）。點 ℹ️ 看完整說明。';
+    const attachHelp = document.createElement('button');
+    attachHelp.type = 'button';
+    attachHelp.className = 'cal-btn task-attach-help';
+    attachHelp.textContent = 'ℹ️';
+    attachHelp.title = '附件說明';
+    attachHelp.setAttribute('aria-label', '附件說明');
+    attachHelp.addEventListener('click', openAttachHelp);
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.multiple = true;
@@ -1521,6 +1533,7 @@ function renderTasks() {
       if (files.length) await addTaskAttachments(t, files);
     });
     metaRow.appendChild(attachBtn);
+    metaRow.appendChild(attachHelp);
     metaRow.appendChild(fileInput);
 
     if (t.done && t.completedAt && settings.autoDeleteDays && settings.autoDeleteDays !== 'never') {
@@ -2282,6 +2295,10 @@ function openExpenses() {
 }
 function closeExpenses() { els.expenseModal.hidden = true; }
 
+// Shared attachment-help modal, opened from the input area and task cards.
+function openAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = false; }
+function closeAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = true; }
+
 function makeBarRow(name, amount, pct, barPct) {
   const row = document.createElement('div');
   row.className = 'exp-bar-row';
@@ -2434,6 +2451,14 @@ els.closeExpenseBtn.addEventListener('click', closeExpenses);
 els.expDoneBtn.addEventListener('click', closeExpenses);
 els.expenseModal.addEventListener('click', (e) => {
   if (e.target === els.expenseModal) closeExpenses();
+});
+
+// Attachment help modal
+if (els.attachHelpBtn) els.attachHelpBtn.addEventListener('click', openAttachHelp);
+if (els.closeAttachHelpBtn) els.closeAttachHelpBtn.addEventListener('click', closeAttachHelp);
+if (els.attachHelpDoneBtn) els.attachHelpDoneBtn.addEventListener('click', closeAttachHelp);
+if (els.attachHelpModal) els.attachHelpModal.addEventListener('click', (e) => {
+  if (e.target === els.attachHelpModal) closeAttachHelp();
 });
 els.expStartDate.addEventListener('change', () => {
   expStartFilter = /^\d{4}-\d{2}-\d{2}$/.test(els.expStartDate.value) ? els.expStartDate.value : '';

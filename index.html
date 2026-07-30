@@ -36,6 +36,7 @@
       <label class="ghost-btn" for="pdfInput">📄 上傳 PDF</label>
       <input id="pdfInput" type="file" accept="application/pdf" hidden>
     </div>
+    <p class="field-note attach-note">附加檔案：任何格式、單檔上限 10MB、Claude 不讀內容；上傳 PDF：抽取文字來整理。<button id="attachHelpBtn" type="button" class="link-btn">ℹ️ 附件說明</button></p>
     <div id="pendingAttach" class="pending-attach" hidden></div>
     <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
     <div class="input-actions">
@@ -185,6 +186,39 @@
     </div>
     <div class="modal-footer">
       <button id="saveSettingsBtn" class="primary-btn">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Attachment help modal (shared by the input area and task cards) -->
+<div id="attachHelpModal" class="modal-backdrop" hidden>
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>📎 附件說明</h2>
+      <button id="closeAttachHelpBtn" class="icon-btn" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <h3 class="help-h">可附加的格式</h3>
+      <p class="help-p">任何檔案格式都可以 —— 圖片（JPG／PNG…）、PDF、Word、Excel、簡報、壓縮檔等都行。</p>
+
+      <h3 class="help-h">大小限制</h3>
+      <p class="help-p">單一檔案上限 <b>10MB</b>。超過的檔案會被擋下並提示，不會被附加。</p>
+
+      <h3 class="help-h">兩種附加方式的差別</h3>
+      <p class="help-p"><b>📎 附加檔案</b>：原樣保留檔案當附件，Claude <b>不會讀取</b>內容。適合合約、收據、照片這類只想存著、日後打開的檔案。</p>
+      <p class="help-p"><b>📄 上傳 PDF</b>：會<b>抽取 PDF 裡的文字</b>交給 Claude 整理成筆記；檔案本身整理後再問你要不要保留。</p>
+
+      <h3 class="help-h">儲存與同步</h3>
+      <p class="help-p">附件存在這台裝置的瀏覽器內；連結 Google Drive 後會一併備份到你雲端硬碟的 App 私有資料夾，多裝置共用。在另一台裝置第一次點開該附件時才會下載檔案。</p>
+
+      <h3 class="help-h">在任務卡片附加</h3>
+      <p class="help-p">從任務卡片的「📎 附加檔案」加入的檔案，會同時出現在<b>該任務</b>與其<b>對應的筆記條列</b>，兩處都能開啟或刪除（刪除會一併移除本機與雲端的檔案）。</p>
+
+      <h3 class="help-h">手機小提醒</h3>
+      <p class="help-p">在手機上點「附加檔案」若只看到相簿，把選擇器切到「檔案／瀏覽」分頁，就能選到 PDF、Word 等文件。</p>
+    </div>
+    <div class="modal-footer">
+      <button id="attachHelpDoneBtn" class="primary-btn">了解</button>
     </div>
   </div>
 </div>
