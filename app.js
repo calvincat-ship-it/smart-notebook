@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v12.01';
+const APP_VERSION = 'v12.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -90,7 +90,7 @@ let cloudTimer = null;    // debounce handle for auto-backup
 let cloudPollTimer = null; // interval handle for auto pull/push while app is open
 let cloudSyncing = false; // guard so overlapping auto-syncs don't run concurrently
 let suppressCloud = false; // true while applying a restore, to avoid backup loop
-const CLOUD_POLL_MS = 20000; // how often to check the cloud for changes while open
+const CLOUD_POLL_MS = 5 * 60 * 1000; // background poll cadence while open (5 min); foreground-return and the 🔄 button sync immediately, so this can be relaxed
 
 function loadState() {
   try {
