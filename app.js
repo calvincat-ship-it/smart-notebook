@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.05';
+const APP_VERSION = 'v11.06';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1219,12 +1219,27 @@ function priorityOf(task) {
   if (total >= 5) auto = 'urgent';
   else if (total >= 3) auto = 'normal';
   else auto = 'low';
-  // A manual override (set by tapping the badge) wins over the auto tier. When
-  // overridden the task no longer escalates as the deadline nears — that's the
-  // point of a manual choice — until the user switches it back to 自動.
-  const overridden = !!(task.priorityOverride && TIER_META[task.priorityOverride]);
-  const tier = overridden ? task.priorityOverride : auto;
+  // A manual override (set by tapping the badge) normally wins over the auto tier
+  // — the task stops escalating as the deadline nears. BUT 緊急 is a protected
+  // floor: when the date makes a task auto-urgent, that is forced (a manual
+  // 普通/可暫緩 is ignored and later cleared). So the override only applies while
+  // auto is below urgent.
+  const overridden = !!(task.priorityOverride && TIER_META[task.priorityOverride]) && auto !== 'urgent';
+  const tier = auto === 'urgent' ? 'urgent' : (overridden ? task.priorityOverride : auto);
   return { tier, total, auto, overridden };
+}
+
+// Enforce the 緊急 floor on stored state: drop any manual 普通/可暫緩 override on a
+// task the date has made auto-urgent (so the forced upgrade persists and the
+// badge stops showing 手動). Runs at load / foreground, like pruneCompletedTasks.
+function enforceUrgentOverrides() {
+  let changed = false;
+  for (const t of state.tasks) {
+    if (!t.priorityOverride || t.priorityOverride === 'urgent') continue;
+    if (priorityOf(t).auto === 'urgent') { delete t.priorityOverride; changed = true; }
+  }
+  if (changed) saveState();
+  return changed;
 }
 
 function dueSuffix(ymd) {
@@ -1414,6 +1429,7 @@ async function openAttachment(att) {
 }
 
 function renderTasks() {
+  enforceUrgentOverrides(); // drop stale 普通/可暫緩 overrides on now-auto-urgent tasks
   const pending = state.tasks;
   els.tasksSection.hidden = pending.length === 0;
   els.tasksList.innerHTML = '';
@@ -1468,8 +1484,15 @@ function renderTasks() {
     badge.appendChild(autoOpt);
     badge.value = p.tier;
     badge.addEventListener('change', () => {
-      if (badge.value === 'auto') delete t.priorityOverride;
-      else t.priorityOverride = badge.value;
+      const v = badge.value;
+      // 緊急 floor: a task the date has made auto-urgent can't be lowered.
+      if (p.auto === 'urgent' && (v === 'normal' || v === 'low')) {
+        alert('這張任務因截止日已達「緊急」，無法調降為較低的緊急程度。\n（等截止日過後或任務完成，就不再強制緊急。）');
+        renderTasks(); // revert the select back to 緊急
+        return;
+      }
+      if (v === 'auto') delete t.priorityOverride;
+      else t.priorityOverride = v;
       saveState();
       renderTasks(); // re-sort, recolour, refresh the 手動 marker
     });
