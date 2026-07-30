@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.04';
+const APP_VERSION = 'v11.05';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -302,6 +302,8 @@ const els = {
   apiKeyInput: $('apiKeyInput'),
   workerUrlInput: $('workerUrlInput'),
   accessCodeInput: $('accessCodeInput'),
+  credGroup: $('credGroup'),
+  credStatus: $('credStatus'),
   modelSelect: $('modelSelect'),
   autoDeleteSelect: $('autoDeleteSelect'),
   usageCalls: $('usageCalls'),
@@ -2477,6 +2479,14 @@ function openSettings() {
   els.accessCodeInput.value = settings.accessCode || '';
   els.modelSelect.value = settings.model || 'claude-opus-4-8';
   els.autoDeleteSelect.value = settings.autoDeleteDays || 'never';
+  // Credential group: collapsed by default (keeps the sensitive fields tucked
+  // away); auto-expanded only when nothing is configured yet, so first-time
+  // setup is visible.
+  if (els.credGroup) {
+    const configured = !!(settings.apiKey || settings.workerUrl || settings.accessCode);
+    els.credGroup.open = !configured;
+    if (els.credStatus) els.credStatus.textContent = configured ? '已設定 ✓' : '尚未設定';
+  }
   renderUsage();
   updateCloudUI();
   els.settingsModal.hidden = false;
@@ -2504,9 +2514,29 @@ els.settingsModal.addEventListener('click', (e) => {
   if (e.target === els.settingsModal) closeSettings();
 });
 els.saveSettingsBtn.addEventListener('click', () => {
-  settings.apiKey = els.apiKeyInput.value.trim();
-  settings.workerUrl = els.workerUrlInput.value.trim();
-  settings.accessCode = els.accessCodeInput.value.trim();
+  const newApiKey = els.apiKeyInput.value.trim();
+  const newWorkerUrl = els.workerUrlInput.value.trim();
+  const newAccessCode = els.accessCodeInput.value.trim();
+
+  // Warn only when CHANGING an already-set credential (not when adding one for
+  // the first time). Clearing an existing value counts as a change too. This
+  // guards against accidentally breaking the connection to Claude.
+  const changed = [];
+  const isChange = (oldVal, newVal) => oldVal && newVal !== oldVal;
+  if (isChange(settings.apiKey, newApiKey)) changed.push('Anthropic API 金鑰');
+  if (isChange(settings.workerUrl, newWorkerUrl)) changed.push('共用中繼站網址');
+  if (isChange(settings.accessCode, newAccessCode)) changed.push('中繼站存取碼');
+  if (changed.length) {
+    const ok = confirm(
+      `你正在變更以下已設定的項目：\n・${changed.join('\n・')}\n\n` +
+      '改錯可能導致無法呼叫 Claude（整理會失敗）。確定要變更嗎？'
+    );
+    if (!ok) return; // abort save; keep the modal open with the typed values
+  }
+
+  settings.apiKey = newApiKey;
+  settings.workerUrl = newWorkerUrl;
+  settings.accessCode = newAccessCode;
   settings.model = els.modelSelect.value;
   settings.autoDeleteDays = els.autoDeleteSelect.value;
   saveSettings();

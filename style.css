@@ -417,6 +417,28 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .field-note { font-size: .8rem; color: var(--ink-soft); margin: 6px 0 0; }
 
+/* Collapsible settings group (credentials) */
+.settings-group { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.settings-group + .field-label { margin-top: 16px; }
+.settings-group-summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600; font-size: .9rem;
+  background: var(--bg);
+  user-select: none;
+}
+.settings-group-summary::-webkit-details-marker { display: none; }
+.settings-group-summary::after {
+  content: '▸'; color: var(--ink-soft); font-size: .85rem; transition: transform .15s ease;
+}
+.settings-group[open] .settings-group-summary::after { transform: rotate(90deg); }
+.settings-group-title { flex: 0 1 auto; }
+.settings-group-hint { margin-left: auto; font-size: .78rem; font-weight: 500; color: var(--ink-soft); }
+.settings-group-body { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
+.settings-group-body .field-label:first-child { margin-top: 12px; }
+
 /* API usage card */
 .usage-card {
   border: 1px solid var(--line);
