@@ -3,24 +3,29 @@
 > 收工時 Claude 更新這裡；開工時 Claude 先讀這裡。跟程式碼一起 git 同步。
 
 ## 最後更新
-- 時間：2026-07-30 收工
+- 時間：2026-07-30（記錄累積變動）
 - 機器：桌機
 
-## 做到哪（本次 session）
-- **暫存功能 v11.00**：輸入卡片加「📥 暫存」，把 textarea 內容存進本機 `state.drafts`（不呼叫 Claude）；暫存區可重新編輯（改空即刪）、🗑 刪除、隨時新增；按「整理」時把所有暫存＋目前輸入＋PDF 文字合併成**單一 API 呼叫**、成功後清空 → 省用量。drafts 為**裝置本機 scratch，刻意不進雲端 bundle**；normalizeState/loadState 向後相容。
-- **暫存附件綁定 v11.01**：暫存時把當下待整理檔案一起收進**那一則**暫存（blob 存 IndexedDB、key＝file ref；draft 只留 metadata）→ 重整不遺失、且與該則綁定。整理時每個檔案帶 `context`＝所屬暫存文字，prompt 要 Claude 依「隨附內容」對應到該段的 bullet、不跨則配錯；純附件無文字→不呼叫 Claude 直接歸 📎 附件；暫存 PDF 的抽取文字併入該則送出。刪則/移除單檔會連帶清 IDB blob。
-- **任務緊急程度手動變更 v11.02**：任務卡片優先度標籤改成可點選膠囊 select（緊急/普通/可暫緩/🔄依日期自動）。手動選級→存 `task.priorityOverride`、即時重排+換色+顯示「✎ 手動」、之後不再隨截止日升級；選「依日期自動」清除 override。`priorityOf` 回傳 `{tier(有效),total,auto,overridden}`；normalizeState 遷移 priorityOverride（僅 urgent/normal/low）。
-- 三項皆 commit+push、preview 實測通過、無 console error。目前線上 **v11.02**。
-- **釐清（非 bug、不要「修」）**：`📎 附加檔案` 沒有 `accept` 限制，PDF 本來就能附加（實測確認）。兩顆按鈕差別是**用途**：附加檔案＝純保留檔案、Claude 不讀內容；上傳 PDF＝抽文字給 Claude。手機上點附加檔案可能預設開相簿，PDF 要切到「檔案／瀏覽」分頁。
+## 做到哪（本次 session，v11.00 → v12.00，皆已 commit+push、preview 實測通過、無 console error）
+- **暫存功能 v11.00**：輸入先存本機 `state.drafts`（不呼叫 Claude），整理時批次成單一 callClaude 省用量；drafts 只存本機、不進雲端 bundle。
+- **暫存附件綁定 v11.01**：檔案綁進所屬暫存（blob 存 IDB key＝ref），整理時每檔帶 context＝該則文字讓 Claude 逐則對應不配錯；純附件不呼叫 Claude。
+- **任務緊急程度手動變更 v11.02**：優先度標籤改可點選膠囊 select（緊急/普通/可暫緩/依日期自動），存 `priorityOverride`。
+- **任務卡片附加檔案 v11.03**：每卡「📎 附加檔案」鈕，`addTaskAttachments` 連到任務第一個 bullet，無則 ensureHomeBullet；chip 可就地刪。
+- **附件說明 v11.04**：共用 `#attachHelpModal`，輸入區與任務卡片皆有 ℹ️ 入口。
+- **設定機密欄位摺疊＋變更確認 v11.05**：中繼站/金鑰摺進 `<details>`，變更已設定值才 confirm，新增不擾。
+- **緊急程度保護規則 v11.06**：緊急為地板——不可手動調降（alert 擋）、日期到 `enforceUrgentOverrides()` 強制升級並清掉低階 override。
+- **首頁改版 v12.00（大改，已確認）**：輸入卡片（含暫存區）移入標題列 ✏️ `#inputModal`，首頁只留待辦任務+分類整理；分類卡片預設摺疊（點展開、N 項計數、`expandedCats` WeakSet）；待辦「普通/可暫緩」預設摺疊、「緊急」永遠展開（`expandedTasks` Set）。
 
 ## 下一步
-- （無待接續工作，可開始新的功能開發。）
+- （無待接續工作。）
 
 ## 待決 / 卡住的問題
 - （無）
 
 ## 注意事項（給另一台的 Claude）
-- 暫存(drafts)只存本機、不上雲；附件 blob 暫存在 IDB(key＝ref)，整理後 createAttachment 會另存新 id 並刪掉 temp ref blob。
-- 版本規則 vNN.MM：小改直接 bump minor、大改先確認；APP_VERSION 與 sw CACHE_NAME 同步。目前 **v11.02**。
-- 記帳：既有已被分到首頁「財務紀錄」的舊自由文字不會自動搬進記帳，只有新輸入才歸集。
+- 摺疊狀態（expandedCats/expandedTasks）是 session-only、不持久化、不同步——重開 App 會回到預設收合，這是刻意的。
+- 暫存(drafts)只存本機、不上雲；附件 blob 暫存在 IDB(key＝ref)，整理後 createAttachment 另存新 id 並刪 temp ref blob。
+- 緊急為地板：勿把 enforceUrgentOverrides 或「auto 緊急強制」邏輯移除。
+- 📎附加檔案本來就能放 PDF（無 accept 限制），勿為此加限制；手機選不到 PDF 是系統選擇器預設開相簿。
+- 版本 vNN.MM：小改直接 bump minor、大改先確認；APP_VERSION 與 sw CACHE_NAME 同步。目前 **v12.00**。
 - 開工先 sync-start、收工必 sync-end；不要兩台同時改同一個檔。
