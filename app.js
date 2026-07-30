@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v10.01';
+const APP_VERSION = 'v11.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -35,7 +35,7 @@ function genId() {
   return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-const defaultState = { categories: [], tasks: [], attachments: [], expenses: [] };
+const defaultState = { categories: [], tasks: [], attachments: [], expenses: [], drafts: [] };
 let state = loadState();
 let settings = loadSettings();
 let usage = loadUsage();
@@ -95,6 +95,7 @@ function loadState() {
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
       attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
       expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+      drafts: Array.isArray(parsed.drafts) ? parsed.drafts : [],
     });
   } catch (e) {
     return structuredClone(defaultState);
@@ -169,7 +170,16 @@ function normalizeState(s) {
       createdAt: e.createdAt || '',
     };
   });
-  return { categories: cats, tasks, attachments, expenses };
+  // Drafts: text stashed locally in the input card, not yet sent to Claude.
+  // Device-local scratch — kept out of the cloud bundle on purpose.
+  const drafts = (Array.isArray(s.drafts) ? s.drafts : [])
+    .map((d) => ({
+      id: d.id || ('df_' + genId()),
+      text: typeof d.text === 'string' ? d.text : '',
+      createdAt: d.createdAt || '',
+    }))
+    .filter((d) => d.text.trim() !== '');
+  return { categories: cats, tasks, attachments, expenses, drafts };
 }
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -246,6 +256,10 @@ const els = {
   attachInput: $('attachInput'),
   pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
+  stashBtn: $('stashBtn'),
+  draftsBox: $('draftsBox'),
+  draftsList: $('draftsList'),
+  draftsCount: $('draftsCount'),
   emptyHint: $('emptyHint'),
   tasksSection: $('tasksSection'),
   tasksList: $('tasksList'),
@@ -703,11 +717,74 @@ async function callClaude(userInput, batchAttachments) {
 }
 
 /* ---------------- Process flow ---------------- */
+/* ---------------- Drafts (暫存) ---------------- */
+// Stash the current textarea text locally without calling Claude. Drafts pile up
+// in state.drafts; they're re-editable and deletable, and only get sent to Claude
+// (all at once) when the user presses 整理 — cutting the number of API calls.
+function stashDraft() {
+  if (recognizing) stopRecording();
+  const text = els.inputText.value.trim();
+  if (!text) { toast('沒有可暫存的文字。'); return; }
+  if (!Array.isArray(state.drafts)) state.drafts = [];
+  state.drafts.push({ id: 'df_' + genId(), text, createdAt: todayStr() });
+  saveState();
+  els.inputText.value = '';
+  renderDrafts();
+  toast('已暫存 ✓');
+}
+
+function renderDrafts() {
+  if (!els.draftsBox) return; // tolerate a stale/mismatched HTML during PWA update
+  const drafts = Array.isArray(state.drafts) ? state.drafts : [];
+  els.draftsBox.hidden = drafts.length === 0;
+  if (els.draftsCount) els.draftsCount.textContent = drafts.length ? `(${drafts.length})` : '';
+  const list = els.draftsList;
+  if (!list) return;
+  list.innerHTML = '';
+  drafts.forEach((d) => {
+    const item = document.createElement('div');
+    item.className = 'draft-item';
+
+    const ta = document.createElement('textarea');
+    ta.className = 'draft-text';
+    ta.rows = 2;
+    ta.value = d.text;
+    ta.addEventListener('blur', () => {
+      const v = ta.value.trim();
+      if (!v) { // edited to empty → remove this draft
+        state.drafts = state.drafts.filter((x) => x.id !== d.id);
+        saveState();
+        renderDrafts();
+        return;
+      }
+      if (v !== d.text) { d.text = v; saveState(); }
+    });
+    item.appendChild(ta);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'draft-del';
+    del.textContent = '🗑';
+    del.title = '刪除這則暫存';
+    del.addEventListener('click', () => {
+      state.drafts = state.drafts.filter((x) => x.id !== d.id);
+      saveState();
+      renderDrafts();
+    });
+    item.appendChild(del);
+
+    list.appendChild(item);
+  });
+}
+
 async function processInput() {
   if (recognizing) stopRecording();
   const typed = els.inputText.value.trim();
   const pdfText = attachedPdf && attachedPdf.text ? attachedPdf.text : '';
-  const combined = [typed, pdfText].filter(Boolean).join('\n\n');
+  const draftTexts = (Array.isArray(state.drafts) ? state.drafts : [])
+    .map((d) => d.text.trim()).filter(Boolean);
+  // Stashed drafts go first (older), then whatever is currently typed, then PDF.
+  const combined = [...draftTexts, typed, pdfText].filter(Boolean).join('\n\n');
   const hasFiles = pendingFiles.length > 0 || !!attachedPdf;
 
   if (!combined && !hasFiles) { toast('請先輸入文字，或附加檔案。'); return; }
@@ -747,6 +824,7 @@ async function processInput() {
       await saveBatchAttachments(batch, linkMap);
     }
 
+    state.drafts = []; // drafts were consumed by this 整理
     saveState();
     render();
     els.inputText.value = '';
@@ -1120,6 +1198,7 @@ function render() {
     els.expenseHintBtn.hidden = expN === 0;
     els.expenseHintBtn.textContent = `💰 已記帳 ${expN} 筆消費 — 點此看統計與明細`;
   }
+  renderDrafts();
   renderTasks();
   renderCategories(orphans);
 }
@@ -2224,6 +2303,7 @@ if (els.cloudDisconnectBtn) els.cloudDisconnectBtn.addEventListener('click', clo
 
 /* ---------------- Wire up ---------------- */
 els.processBtn.addEventListener('click', processInput);
+if (els.stashBtn) els.stashBtn.addEventListener('click', stashDraft);
 $('addCatBtn').addEventListener('click', addCategory);
 $('emptyAddCatBtn').addEventListener('click', addCategory);
 els.clearBtn.addEventListener('click', () => {

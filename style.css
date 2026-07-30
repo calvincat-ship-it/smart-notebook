@@ -144,6 +144,49 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .primary-btn:active { transform: scale(.99); }
 .primary-btn:disabled { opacity: .55; }
 
+/* Input actions row: 暫存 (ghost) beside 整理 (primary, fills the rest) */
+.input-actions { display: flex; gap: 10px; align-items: stretch; }
+.input-actions .ghost-btn { flex: 0 0 auto; justify-content: center; }
+.input-actions .primary-btn { flex: 1 1 auto; width: auto; }
+
+/* 暫存區 — locally stashed drafts, not yet sent to Claude */
+.drafts-box {
+  margin-top: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--bg);
+}
+.drafts-head { font-size: .9rem; font-weight: 600; color: var(--ink); margin-bottom: 8px; }
+.drafts-head span { color: var(--ink-soft); font-weight: 400; }
+.drafts-list { display: flex; flex-direction: column; gap: 8px; }
+.draft-item { display: flex; gap: 8px; align-items: flex-start; }
+.draft-item .draft-text {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: .9rem;
+  resize: vertical;
+  color: var(--ink);
+  background: #fff;
+}
+.draft-item .draft-text:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.draft-del {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-soft);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: .95rem;
+  cursor: pointer;
+  line-height: 1;
+}
+.draft-del:active { background: var(--bg); }
+
 .empty-hint {
   text-align: center;
   color: var(--ink-soft);
