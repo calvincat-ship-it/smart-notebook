@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.01';
+const APP_VERSION = 'v11.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -145,6 +145,7 @@ function normalizeState(s) {
       sourceCategory: t.sourceCategory || '',
       linkedItemIds,
       done: !!t.done,
+      ...(['urgent', 'normal', 'low'].includes(t.priorityOverride) ? { priorityOverride: t.priorityOverride } : {}),
       ...(t.completedAt ? { completedAt: t.completedAt } : {}),
     };
   });
@@ -1177,11 +1178,16 @@ function priorityOf(task) {
   else if (du <= 14) dueScore = 1;
   else dueScore = 0;
   const total = impScore + dueScore;     // 1..7
-  let tier;
-  if (total >= 5) tier = 'urgent';
-  else if (total >= 3) tier = 'normal';
-  else tier = 'low';
-  return { tier, total };
+  let auto;
+  if (total >= 5) auto = 'urgent';
+  else if (total >= 3) auto = 'normal';
+  else auto = 'low';
+  // A manual override (set by tapping the badge) wins over the auto tier. When
+  // overridden the task no longer escalates as the deadline nears — that's the
+  // point of a manual choice — until the user switches it back to 自動.
+  const overridden = !!(task.priorityOverride && TIER_META[task.priorityOverride]);
+  const tier = overridden ? task.priorityOverride : auto;
+  return { tier, total, auto, overridden };
 }
 
 function dueSuffix(ymd) {
@@ -1405,9 +1411,42 @@ function renderTasks() {
     const main = document.createElement('div');
     main.className = 'task-main';
 
-    const badge = document.createElement('span');
-    badge.className = 'pri-badge';
-    badge.textContent = meta.label;
+    // Priority badge as a tap-to-change control. Options are the three tiers
+    // plus 自動 (clears the override → back to date-based auto). The selected
+    // value is the effective tier, so the badge always shows 緊急/普通/可暫緩.
+    const badge = document.createElement('select');
+    badge.className = 'pri-badge pri-select' + (p.overridden ? ' pri-manual' : '');
+    badge.setAttribute('aria-label', '緊急程度，可點選變更');
+    badge.title = p.overridden
+      ? '緊急程度已手動設定；選「依日期自動」可改回自動判斷'
+      : '點一下可手動變更緊急程度';
+    for (const [val, label] of [['urgent', '緊急'], ['normal', '普通'], ['low', '可暫緩']]) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      badge.appendChild(o);
+    }
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 'auto';
+    autoOpt.textContent = `🔄 依日期自動（${TIER_META[p.auto].label}）`;
+    badge.appendChild(autoOpt);
+    badge.value = p.tier;
+    badge.addEventListener('change', () => {
+      if (badge.value === 'auto') delete t.priorityOverride;
+      else t.priorityOverride = badge.value;
+      saveState();
+      renderTasks(); // re-sort, recolour, refresh the 手動 marker
+    });
+
+    const badgeRow = document.createElement('div');
+    badgeRow.className = 'pri-row';
+    badgeRow.appendChild(badge);
+    if (p.overridden) {
+      const mk = document.createElement('span');
+      mk.className = 'pri-manual-mark';
+      mk.textContent = '✎ 手動';
+      mk.title = '此任務的緊急程度為手動設定';
+      badgeRow.appendChild(mk);
+    }
 
     const text = document.createElement('div');
     text.className = 'task-text';
@@ -1444,7 +1483,7 @@ function renderTasks() {
       metaRow.appendChild(info);
     }
 
-    main.appendChild(badge);
+    main.appendChild(badgeRow);
     main.appendChild(text);
     main.appendChild(metaRow);
 
