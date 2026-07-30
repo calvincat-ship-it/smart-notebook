@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v11.02';
+const APP_VERSION = 'v11.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1123,6 +1123,37 @@ async function createAttachment(src, linkedItemIds) {
   return att;
 }
 
+// Add file(s) to a task from its card. Attachments live on note items (bullets),
+// so we link the file to the task's first linked bullet — that makes it show on
+// the task and on that note. If the task has no linked bullet yet, give it a home
+// bullet (in 📎 附件) and link the task to it, so the file always has a place.
+async function addTaskAttachments(t, files) {
+  setLoading(true);
+  try {
+    let targetId = (t.linkedItemIds && t.linkedItemIds[0]) || null;
+    if (!targetId) {
+      targetId = ensureHomeBullet(t.task || '任務附件');
+      if (!Array.isArray(t.linkedItemIds)) t.linkedItemIds = [];
+      t.linkedItemIds.push(targetId);
+    }
+    let added = 0;
+    for (const file of files) {
+      if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 10MB，無法附加。`); continue; }
+      await createAttachment({ blob: file, name: file.name, type: file.type || '', size: file.size }, [targetId]);
+      added++;
+    }
+    if (added) {
+      saveState();
+      render();
+      toast(added > 1 ? `已附加 ${added} 個檔案 ✓` : '已附加檔案 ✓');
+    }
+  } catch (err) {
+    toast('附加失敗：' + err.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
 function setLoading(on) {
   els.loadingOverlay.hidden = !on;
   els.processBtn.disabled = on;
@@ -1473,6 +1504,25 @@ function renderTasks() {
     cal.textContent = '＋ 加入行事曆';
     metaRow.appendChild(cal);
 
+    // Attach a file straight from the task card (kept as an attachment; text is
+    // not extracted). Each card gets its own hidden input.
+    const attachBtn = document.createElement('button');
+    attachBtn.type = 'button';
+    attachBtn.className = 'cal-btn task-attach-btn';
+    attachBtn.textContent = '📎 附加檔案';
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.multiple = true;
+    fileInput.hidden = true;
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      fileInput.value = '';
+      if (files.length) await addTaskAttachments(t, files);
+    });
+    metaRow.appendChild(attachBtn);
+    metaRow.appendChild(fileInput);
+
     if (t.done && t.completedAt && settings.autoDeleteDays && settings.autoDeleteDays !== 'never') {
       const days = Number(settings.autoDeleteDays);
       const since = -(daysUntil(t.completedAt) ?? 0);
@@ -1492,7 +1542,7 @@ function renderTasks() {
     if (atts.length) {
       const attRow = document.createElement('div');
       attRow.className = 'attach-row';
-      for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: false }));
+      for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
       main.appendChild(attRow);
     }
 
