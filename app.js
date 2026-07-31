@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v12.03';
+const APP_VERSION = 'v12.04';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -48,6 +48,8 @@ let pendingFocus = null;     // category index whose newly-added item should get
 // collapsed; tasks of tier 普通/可暫緩 default to collapsed (緊急 always expanded).
 const expandedCats = new WeakSet();  // category objects the user has expanded
 const expandedTasks = new Set();     // task ids the user has expanded
+const editingCats = new WeakSet();   // categories whose name is being edited (via ✏️)
+let pendingEditCat = null;           // category to focus once it re-renders in edit mode
 
 /* ---------------- Attachment blob store (IndexedDB) ---------------- */
 // localStorage can't hold binary; blobs are cached here keyed by attachment id.
@@ -1647,21 +1649,50 @@ function renderCategories(orphans) {
     const subs = cat.subsections || [];
     const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
 
+    const editing = editingCats.has(cat);
     const head = document.createElement('div');
     head.className = 'category-head';
     const caret = document.createElement('span');
     caret.className = 'cat-caret';
     caret.textContent = '▸';
-    const title = document.createElement('input');
-    title.className = 'category-title';
-    title.value = cat.title || '未命名分類';
-    title.addEventListener('change', () => {
-      cat.title = title.value.trim() || '未命名分類';
-      saveState();
-    });
+
+    // Title is display-only (tapping it just expands/collapses); editing starts
+    // only via the ✏️ button, so tapping to expand can't accidentally edit it.
+    let title;
+    if (editing) {
+      title = document.createElement('input');
+      title.className = 'category-title';
+      title.value = cat.title || '未命名分類';
+      const commit = () => {
+        cat.title = title.value.trim() || '未命名分類';
+        editingCats.delete(cat);
+        saveState();
+        renderCategories();
+      };
+      title.addEventListener('blur', commit);
+      title.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
+    } else {
+      title = document.createElement('span');
+      title.className = 'category-title';
+      title.textContent = cat.title || '未命名分類';
+    }
+
     const count = document.createElement('span');
     count.className = 'cat-count';
     count.textContent = totalBullets ? `${totalBullets} 項` : '空';
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'cat-edit';
+    editBtn.textContent = '✏️';
+    editBtn.title = '編輯分類名稱';
+    editBtn.setAttribute('aria-label', '編輯分類名稱');
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editingCats.add(cat);
+      pendingEditCat = cat;
+      renderCategories();
+    });
+
     const catDel = document.createElement('button');
     catDel.className = 'cat-del';
     catDel.textContent = '🗑';
@@ -1673,15 +1704,20 @@ function renderCategories(orphans) {
       saveState();
       render();
     });
-    // Tap the head to expand/collapse — except when editing the title.
+
+    // Tap the head to expand/collapse — but not while editing the name, and not
+    // when the tap is on the ✏️ / 🗑 buttons.
     head.addEventListener('click', (e) => {
-      if (e.target === title) return;
+      if (editing) return;
+      if (e.target.closest('.cat-edit') || e.target.closest('.cat-del')) return;
       if (expandedCats.has(cat)) expandedCats.delete(cat); else expandedCats.add(cat);
       renderCategories();
     });
+
     head.appendChild(caret);
     head.appendChild(title);
     head.appendChild(count);
+    head.appendChild(editBtn);
     head.appendChild(catDel);
 
     const bodyEl = document.createElement('div');
@@ -1770,6 +1806,9 @@ function renderCategories(orphans) {
     card.appendChild(head);
     card.appendChild(bodyEl);
     els.categoriesList.appendChild(card);
+
+    // Just entered edit mode for this category → focus & select its name field.
+    if (editing && cat === pendingEditCat) { title.focus(); title.select(); pendingEditCat = null; }
   });
 
   // Fallback: files whose linked note item no longer exists — keep them reachable.
@@ -1834,14 +1873,11 @@ function addItem(cat) {
 function addCategory() {
   const cat = { title: '新分類', subsections: [] };
   state.categories.push(cat);
-  expandedCats.add(cat); // open it so the user can add items right away
+  expandedCats.add(cat);  // open it so the user can add items right away
+  editingCats.add(cat);   // and start in name-edit mode (focused via pendingEditCat)
+  pendingEditCat = cat;
   saveState();
   render();
-  const card = els.categoriesList.querySelector(`.category[data-ci="${state.categories.length - 1}"]`);
-  if (card) {
-    const t = card.querySelector('.category-title');
-    if (t) { t.focus(); t.select(); }
-  }
 }
 function placeCaretEnd(el) {
   const r = document.createRange();
