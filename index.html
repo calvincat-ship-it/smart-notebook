@@ -74,8 +74,10 @@
           <input id="attachInput" type="file" multiple hidden>
           <label class="ghost-btn" for="pdfInput">📄 上傳 PDF</label>
           <input id="pdfInput" type="file" accept="application/pdf" hidden>
+          <label class="ghost-btn" for="ocrInput">🖼 圖片輸入</label>
+          <input id="ocrInput" type="file" accept="image/*" multiple hidden>
         </div>
-        <p class="field-note attach-note">附加檔案：任何格式、單檔上限 10MB、Claude 不讀內容；上傳 PDF：抽取文字來整理。<button id="attachHelpBtn" type="button" class="link-btn">ℹ️ 附件說明</button></p>
+        <p class="field-note attach-note">附加檔案：任何格式、Claude 不讀內容；上傳 PDF：抽取文字；🖼 圖片輸入：交給 Claude 視覺辨識圖中文字(OCR)並整理。<button id="attachHelpBtn" type="button" class="link-btn">ℹ️ 附件說明</button></p>
         <div id="pendingAttach" class="pending-attach" hidden></div>
         <p id="micHint" class="mic-hint" hidden>🔴 錄音中…請說話，再按一次停止</p>
         <div class="input-actions">
@@ -228,9 +230,10 @@
       <h3 class="help-h">大小限制</h3>
       <p class="help-p">單一檔案上限 <b>10MB</b>。超過的檔案會被擋下並提示，不會被附加。</p>
 
-      <h3 class="help-h">兩種附加方式的差別</h3>
+      <h3 class="help-h">三種輸入檔案的差別</h3>
       <p class="help-p"><b>📎 附加檔案</b>：原樣保留檔案當附件，Claude <b>不會讀取</b>內容。適合合約、收據、照片這類只想存著、日後打開的檔案。</p>
-      <p class="help-p"><b>📄 上傳 PDF</b>：會<b>抽取 PDF 裡的文字</b>交給 Claude 整理成筆記；檔案本身整理後再問你要不要保留。</p>
+      <p class="help-p"><b>📄 上傳 PDF</b>：會<b>抽取 PDF 裡的文字</b>交給 Claude 整理成筆記；對掃描／拍照的 PDF 抽不到字。檔案本身整理後再問你要不要保留。</p>
+      <p class="help-p"><b>🖼 圖片輸入（OCR）</b>：把圖片交給 Claude <b>視覺辨識圖中的文字</b>並整理（連手寫、表格、單據都行），比傳統 OCR 更懂內容。支援 JPG／PNG／GIF／WebP、單張上限 10MB；辨識完成後再問你要不要保留原圖作為附件。<b>圖片會用到較多用量。</b></p>
 
       <h3 class="help-h">儲存與同步</h3>
       <p class="help-p">附件存在這台裝置的瀏覽器內；連結 Google Drive 後會一併備份到你雲端硬碟的 App 私有資料夾，多裝置共用。在另一台裝置第一次點開該附件時才會下載檔案。</p>

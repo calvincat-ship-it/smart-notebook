@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v12.04';
+const APP_VERSION = 'v13.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -43,6 +43,8 @@ let cloudState = loadCloudState();
 // Files staged in the input card, awaiting 整理:
 let pendingFiles = [];       // [{ ref, name, type, size, blob }] from 📎 附加檔案 (kept as attachments)
 let attachedPdf = null;      // { ref, name, type, size, blob, text } from 📄 上傳 PDF (text-extracted; kept only if user confirms)
+let ocrImages = [];          // [{ ref, name, type, size, blob }] from 🖼 圖片輸入 (sent to Claude's vision for OCR; kept only if user confirms)
+const OCR_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']; // formats the Anthropic vision API accepts
 let pendingFocus = null;     // category index whose newly-added item should get focus
 // Collapse/expand UI state (session-only, not persisted). Categories default to
 // collapsed; tasks of tier 普通/可暫緩 default to collapsed (緊急 always expanded).
@@ -275,6 +277,7 @@ const els = {
   micBtn: $('micBtn'),
   micHint: $('micHint'),
   pdfInput: $('pdfInput'),
+  ocrInput: $('ocrInput'),
   attachInput: $('attachInput'),
   pendingAttach: $('pendingAttach'),
   processBtn: $('processBtn'),
@@ -421,9 +424,34 @@ if (els.pdfInput) els.pdfInput.addEventListener('change', async (e) => {
   renderPending();
 });
 
+// 🖼 圖片輸入 — images are sent to Claude's vision (OCR): it reads the text in the
+// picture and organizes it with everything else. The image itself is kept as an
+// attachment only if the user confirms after 整理 (like the PDF rule).
+if (els.ocrInput) els.ocrInput.addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    const mt = (file.type || '').toLowerCase();
+    if (!OCR_MEDIA_TYPES.includes(mt)) { toast(`「${file.name}」不是支援的圖片格式（請用 JPG／PNG／GIF／WebP）。`); continue; }
+    if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 10MB，無法辨識。`); continue; }
+    ocrImages.push({ ref: 'o' + genId(), name: file.name, type: mt, size: file.size, blob: file });
+  }
+  els.ocrInput.value = '';
+  renderPending();
+});
+
+// Read a blob as a bare base64 string (no data: prefix) for the vision API.
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result); const i = s.indexOf(','); resolve(i >= 0 ? s.slice(i + 1) : s); };
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
 function clearPending() {
   pendingFiles = [];
   attachedPdf = null;
+  ocrImages = [];
   renderPending();
 }
 
@@ -436,6 +464,9 @@ function renderPending() {
   }
   for (const f of pendingFiles) {
     chips.push({ kind: 'file', ref: f.ref, label: `${fileIcon(f.type, f.name)} ${f.name}（${fmtSize(f.size)}）` });
+  }
+  for (const g of ocrImages) {
+    chips.push({ kind: 'ocr', ref: g.ref, label: `🖼 ${g.name}（辨識文字）` });
   }
   els.pendingAttach.innerHTML = '';
   els.pendingAttach.hidden = chips.length === 0;
@@ -452,6 +483,7 @@ function renderPending() {
     rm.textContent = '✕';
     rm.addEventListener('click', () => {
       if (c.kind === 'pdf') attachedPdf = null;
+      else if (c.kind === 'ocr') ocrImages = ocrImages.filter((g) => g.ref !== c.ref);
       else pendingFiles = pendingFiles.filter((f) => f.ref !== c.ref);
       renderPending();
     });
@@ -690,7 +722,7 @@ function categoriesForClaude() {
   }));
 }
 
-async function callClaude(userInput, batchAttachments) {
+async function callClaude(userInput, batchAttachments, visionImages) {
   const ep = claudeEndpoint();
   if (!ep.relay && !settings.apiKey) {
     throw new Error('尚未設定 API 金鑰或中繼站，請點右上角 ⚙ 設定。');
@@ -698,11 +730,19 @@ async function callClaude(userInput, batchAttachments) {
   const today = new Date().toISOString().slice(0, 10);
   const existing = JSON.stringify(categoriesForClaude());
   const hasAtt = Array.isArray(batchAttachments) && batchAttachments.length > 0;
+  const hasImg = Array.isArray(visionImages) && visionImages.length > 0;
 
   let userContent =
     `今天的日期是 ${today}。\n\n` +
     `目前既有的分類（JSON）：\n${existing}\n\n` +
     `以下是使用者這次新提供的內容，請合併整理並找出任務：\n"""\n${userInput}\n"""`;
+
+  if (hasImg) {
+    userContent +=
+      `\n\n使用者這次還附上了 ${visionImages.length} 張圖片。請先辨識（OCR）每張圖片中的文字，` +
+      '把辨識出的內容當作這次新提供的內容一起整理（分類、找任務、找消費）。' +
+      '若圖片是表格、單據、清單，請盡量保留其結構；辨識不清的地方就略過、不要臆造。';
+  }
 
   if (hasAtt) {
     const list = batchAttachments.map((a) => {
@@ -719,11 +759,20 @@ async function callClaude(userInput, batchAttachments) {
       '沒有標示隨附內容、或真的無法判斷時，才對應到這次新內容最主要的那一條 bullet。每個附件的 ref 都要出現在 attachmentLinks 中。';
   }
 
+  // With images, the user content becomes a block array (images first, then the
+  // text) so Claude's vision reads the pictures; otherwise a plain string.
+  const content = hasImg
+    ? [
+        ...visionImages.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })),
+        { type: 'text', text: userContent },
+      ]
+    : userContent;
+
   const body = {
     model: settings.model || 'claude-opus-4-8',
     max_tokens: 8000,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
+    messages: [{ role: 'user', content }],
     output_config: { format: { type: 'json_schema', schema: buildSchema(hasAtt) } },
   };
 
@@ -903,11 +952,13 @@ async function processInput() {
   for (const f of pendingFiles) batch.push({ ref: f.ref, name: f.name, context: typed, src: f });
   if (attachedPdf) batch.push({ ref: attachedPdf.ref, name: attachedPdf.name, context: typed, src: attachedPdf, isPdf: true });
 
-  if (!combined && batch.length === 0) { toast('請先輸入文字，或附加檔案。'); return; }
+  const hasOcr = ocrImages.length > 0; // 🖼 images need Claude's vision, so they force an API call
 
-  // Nothing for Claude to organize — just save the files to home bullets (no API
-  // call, keeping usage down), then clear drafts and the input.
-  if (!combined) {
+  if (!combined && batch.length === 0 && !hasOcr) { toast('請先輸入文字，或附加檔案。'); return; }
+
+  // Nothing for Claude to organize (no text, no images) — just save the files to
+  // home bullets (no API call, keeping usage down), then clear drafts and input.
+  if (!combined && !hasOcr) {
     setLoading(true);
     try {
       for (const b of batch) {
@@ -931,8 +982,19 @@ async function processInput() {
 
   setLoading(true);
   try {
+    // Encode 🖼 images to base64 for the vision API (Claude OCRs them).
+    const visionImages = [];
+    for (const g of ocrImages) {
+      try { visionImages.push({ media_type: g.type, data: await blobToBase64(g.blob), src: g }); }
+      catch (e) { /* skip an unreadable image */ }
+    }
+
     const preTexts = allBulletTexts(); // snapshot before merge → detect new bullets
-    const result = await callClaude(combined, batch.map((b) => ({ ref: b.ref, name: b.name, context: b.context })));
+    const result = await callClaude(
+      combined,
+      batch.map((b) => ({ ref: b.ref, name: b.name, context: b.context })),
+      visionImages.map((v) => ({ media_type: v.media_type, data: v.data })),
+    );
 
     // categories: merge Claude's full set, preserving ids of unchanged bullets
     if (Array.isArray(result.categories)) {
@@ -947,6 +1009,17 @@ async function processInput() {
     if (batch.length) {
       const linkMap = buildAttachmentLinkMap(result.attachmentLinks, preTexts, batch);
       await saveBatchAttachments(batch, linkMap);
+    }
+
+    // OCR images: after reading, ask whether to keep the originals as attachments
+    // (like the PDF keep-rule). Kept images link to the bullets this batch created.
+    if (visionImages.length && confirm(`要保留這 ${visionImages.length} 張圖片作為附件嗎？\n（辨識已完成；保留可日後從對應筆記開啟原圖）`)) {
+      const newIds = collectNewBulletIds(preTexts);
+      for (const v of visionImages) {
+        const g = v.src;
+        const link = newIds.length ? newIds.slice() : [ensureHomeBullet(g.name)];
+        await createAttachment({ blob: g.blob, name: g.name, type: g.type, size: g.size }, link);
+      }
     }
 
     state.drafts = []; // drafts were consumed by this 整理
