@@ -104,6 +104,21 @@
       <button id="closeExpenseBtn" class="icon-btn" aria-label="關閉">✕</button>
     </div>
     <div class="modal-body">
+      <!-- 掃描電子發票 QR 記帳（僅在有原生 BarcodeDetector 的裝置顯示，如 Android Chrome）-->
+      <div id="invScanSection" class="inv-scan-section" hidden>
+        <button id="invScanBtn" class="primary-btn" type="button">📷 掃描發票 QR 記帳</button>
+        <p class="field-note">掃描電子發票證明聯上的 QR code，自動讀出品項與金額。紙本發票左右各一個 QR：先掃<b>左邊（較長、必掃）</b>，再掃右邊可補齊明細。</p>
+        <div id="invScanBox" class="inv-scan-box" hidden>
+          <video id="invVideo" playsinline muted></video>
+          <p id="invScanStatus" class="inv-scan-status"></p>
+          <div class="inv-scan-actions">
+            <button id="invScanDone" class="primary-btn" type="button" disabled>完成掃描</button>
+            <button id="invScanCancel" class="ghost-btn" type="button">取消</button>
+          </div>
+        </div>
+        <div id="invResult" class="inv-result" hidden></div>
+      </div>
+
       <div class="exp-filter">
         <label class="field-label" for="expStartDate">統計起始日期</label>
         <div class="exp-filter-row">

@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v13.00';
+const APP_VERSION = 'v14.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -180,6 +180,9 @@ function normalizeState(s) {
       date: /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') ? e.date : '',
       category: (typeof e.category === 'string' && e.category.trim()) ? e.category.trim() : '其他',
       createdAt: e.createdAt || '',
+      // Source invoice number when this record came from a scanned 電子發票 QR;
+      // used to avoid recording the same invoice twice. Absent for typed records.
+      inv: (typeof e.inv === 'string' && e.inv) ? e.inv : undefined,
     };
   });
   // Drafts: text (and optionally files) stashed locally in the input card, not
@@ -313,6 +316,14 @@ const els = {
   expList: $('expList'),
   expEmpty: $('expEmpty'),
   expDoneBtn: $('expDoneBtn'),
+  invScanSection: $('invScanSection'),
+  invScanBtn: $('invScanBtn'),
+  invScanBox: $('invScanBox'),
+  invVideo: $('invVideo'),
+  invScanStatus: $('invScanStatus'),
+  invScanDone: $('invScanDone'),
+  invScanCancel: $('invScanCancel'),
+  invResult: $('invResult'),
   settingsBtn: $('settingsBtn'),
   settingsModal: $('settingsModal'),
   closeSettingsBtn: $('closeSettingsBtn'),
@@ -2578,7 +2589,11 @@ function openExpenses() {
   renderExpenses();
   els.expenseModal.hidden = false;
 }
-function closeExpenses() { els.expenseModal.hidden = true; }
+function closeExpenses() {
+  stopInvScan();
+  if (els.invResult) els.invResult.hidden = true;
+  els.expenseModal.hidden = true;
+}
 
 // Shared attachment-help modal, opened from the input area and task cards.
 function openAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = false; }
@@ -2750,6 +2765,271 @@ els.expDoneBtn.addEventListener('click', closeExpenses);
 els.expenseModal.addEventListener('click', (e) => {
   if (e.target === els.expenseModal) closeExpenses();
 });
+
+/* ---------------- 掃描電子發票 QR 記帳 ---------------- */
+// The paper 電子發票證明聯 carries two QR codes. The LEFT one holds a fixed
+// 77-char ASCII header (invoice number, date, sales/total amount in hex,
+// buyer/seller 統編, an AES check block) followed by the item list; the RIGHT
+// one continues the item list, or is just "**" when the full detail lives only
+// on the MOF platform. We parse it all locally — no API, no key, nothing leaves
+// the device. Only works where the browser has a native QR BarcodeDetector
+// (Android Chrome etc.); iOS Safari lacks it, so the section stays hidden.
+let invScanStream = null;   // live MediaStream while the camera is open
+let invScanTimer = null;    // setTimeout handle for the detect loop
+let invDetector = null;     // cached BarcodeDetector instance
+let invLeft = '';           // captured left-QR raw string
+let invRight = '';          // captured right-QR raw string
+
+async function invScanSupported() {
+  if (!('BarcodeDetector' in window)) return false;
+  try {
+    const fmts = await window.BarcodeDetector.getSupportedFormats();
+    return Array.isArray(fmts) && fmts.includes('qr_code');
+  } catch { return false; }
+}
+
+// The left QR always starts with the invoice number (2 letters + 8 digits) then
+// the 7-digit ROC date, and is at least 77 chars. Anything else we treat as the
+// right/continuation QR.
+function isLeftQR(s) {
+  return typeof s === 'string' && s.length >= 77 && /^[A-Z]{2}\d{8}\d{7}/.test(s);
+}
+
+function minguoToISO(d) {
+  if (!/^\d{7}$/.test(d)) return '';
+  const y = parseInt(d.slice(0, 3), 10) + 1911;
+  const m = d.slice(3, 5), day = d.slice(5, 7);
+  if (+m < 1 || +m > 12 || +day < 1 || +day > 31) return '';
+  return `${y}-${m}-${day}`;
+}
+
+// Item names may arrive as UTF-8 (already valid CJK) or as Big5 bytes the
+// detector handed back byte-for-byte (looks like Latin1 mojibake) — recover the
+// latter via a Big5 TextDecoder. English-only names pass through untouched.
+function decodeInvName(s) {
+  if (typeof s !== 'string') return '';
+  s = s.trim();
+  if (!s) return '';
+  if (/[一-鿿＀-￯]/.test(s)) return s;
+  try {
+    const bytes = Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff);
+    const dec = new TextDecoder('big5', { fatal: false }).decode(bytes);
+    const cleaned = dec.replace(/�/g, '').trim();
+    if (/[一-鿿]/.test(cleaned)) return cleaned;
+  } catch { /* ignore, fall through */ }
+  return s;
+}
+
+// Item section = left[77:] + right (minus a leading "**"), colon-delimited as
+// barcodeItemCount:invoiceItemCount:encoding:name:qty:price:name:qty:price:...
+// "**" on its own means the detail was not embedded in the QR.
+function parseInvItems(leftRest, right) {
+  let prod = leftRest || '';
+  if (right && right !== '**') prod += right.startsWith('**') ? right.slice(2) : right;
+  prod = prod.replace(/^:+/, '');
+  if (!prod) return [];
+  const toks = prod.split(':');
+  if (toks.length < 6) return [];           // need at least the 3 headers + 1 triple
+  const rest = toks.slice(3);               // drop the two counts + encoding param
+  const items = [];
+  for (let i = 0; i + 2 < rest.length; i += 3) {
+    const name = decodeInvName(rest[i]);
+    const qty = parseInt(rest[i + 1], 10);
+    const price = Number(rest[i + 2]);
+    if (!name || !isFinite(price)) continue;
+    items.push({ name, qty: isFinite(qty) && qty > 0 ? qty : 1, price });
+  }
+  return items;
+}
+
+function parseEinvoiceQR(left, right) {
+  if (!isLeftQR(left)) return null;
+  const total = parseInt(left.slice(29, 37), 16);
+  return {
+    invNum: left.slice(0, 10),
+    date: minguoToISO(left.slice(10, 17)),
+    total: isFinite(total) ? total : 0,
+    sellerBAN: left.slice(45, 53),
+    items: parseInvItems(left.slice(77), right),
+  };
+}
+
+function updateInvScanStatus() {
+  if (!els.invScanStatus) return;
+  const l = invLeft ? '左碼 ✓' : '左碼 …';
+  const r = invRight ? '右碼 ✓' : '右碼（明細，可略）';
+  els.invScanStatus.textContent = `對準發票上的 QR：${l}　${r}`;
+  if (els.invScanDone) els.invScanDone.disabled = !invLeft;
+}
+
+function invScanTick() {
+  invScanTimer = setTimeout(async () => {
+    if (!invScanStream) return;
+    try {
+      const codes = await invDetector.detect(els.invVideo);
+      let got = false;
+      for (const c of codes) {
+        const v = (c.rawValue || '').trim();
+        if (!v) continue;
+        if (isLeftQR(v)) { if (invLeft !== v) { invLeft = v; got = true; } }
+        else if (invRight !== v) { invRight = v; got = true; }
+      }
+      if (got) {
+        if (navigator.vibrate) navigator.vibrate(40);
+        updateInvScanStatus();
+      }
+      if (invLeft && invRight) { finishInvScan(); return; }  // auto-finish once both are in
+    } catch { /* transient decode error — keep scanning */ }
+    invScanTick();
+  }, 250);
+}
+
+async function startInvScan() {
+  invLeft = ''; invRight = '';
+  if (els.invResult) { els.invResult.hidden = true; els.invResult.innerHTML = ''; }
+  try {
+    invDetector = invDetector || new window.BarcodeDetector({ formats: ['qr_code'] });
+    invScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+  } catch (err) {
+    toast('無法開啟相機：' + ((err && err.message) ? err.message : '請確認已允許相機權限'));
+    return;
+  }
+  els.invVideo.srcObject = invScanStream;
+  try { await els.invVideo.play(); } catch { /* autoplay quirks — ignore */ }
+  els.invScanBox.hidden = false;
+  els.invScanBtn.hidden = true;
+  updateInvScanStatus();
+  invScanTick();
+}
+
+function stopInvScan() {
+  if (invScanTimer) { clearTimeout(invScanTimer); invScanTimer = null; }
+  if (invScanStream) { invScanStream.getTracks().forEach((t) => t.stop()); invScanStream = null; }
+  if (els.invVideo) els.invVideo.srcObject = null;
+  if (els.invScanBox) els.invScanBox.hidden = true;
+  if (els.invScanBtn) els.invScanBtn.hidden = false;
+}
+
+function cancelInvScan() {
+  stopInvScan();
+  if (els.invResult) els.invResult.hidden = true;
+}
+
+function finishInvScan() {
+  stopInvScan();
+  const parsed = parseEinvoiceQR(invLeft, invRight);
+  if (!parsed) { toast('沒讀到有效的電子發票 QR（請對準左邊那個較長的 QR code）。'); return; }
+  showInvResult(parsed);
+}
+
+function showInvResult(p) {
+  const box = els.invResult;
+  box.hidden = false;
+  box.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'inv-result-head';
+  head.textContent = `發票 ${p.invNum}　${p.date || '日期未知'}　總計 ${fmtMoney(p.total)}`;
+  box.appendChild(head);
+
+  const hasItems = p.items.length > 0;
+  const listWrap = document.createElement('div');
+  listWrap.className = 'inv-result-items';
+  if (hasItems) {
+    for (const it of p.items) {
+      const row = document.createElement('div');
+      row.className = 'inv-item-row';
+      const name = document.createElement('span'); name.textContent = it.name;
+      const qty = document.createElement('span'); qty.className = 'inv-item-qty'; qty.textContent = '×' + it.qty;
+      const amt = document.createElement('span'); amt.className = 'inv-item-amt'; amt.textContent = fmtMoney(it.price * it.qty);
+      row.appendChild(name); row.appendChild(qty); row.appendChild(amt);
+      listWrap.appendChild(row);
+    }
+  } else {
+    const none = document.createElement('p');
+    none.className = 'field-note';
+    none.textContent = '這張發票的 QR 沒有內含品項明細（可能品項太多，明細只上傳到財政部平台）。可改用「整張記一筆」記錄總金額。';
+    listWrap.appendChild(none);
+  }
+  box.appendChild(listWrap);
+
+  const actions = document.createElement('div');
+  actions.className = 'inv-result-actions';
+  if (hasItems) {
+    const bItems = document.createElement('button');
+    bItems.className = 'primary-btn'; bItems.type = 'button';
+    bItems.textContent = `逐項記帳（${p.items.length} 筆）`;
+    bItems.addEventListener('click', () => commitInvItems(p));
+    actions.appendChild(bItems);
+  }
+  const bTotal = document.createElement('button');
+  bTotal.className = hasItems ? 'ghost-btn' : 'primary-btn'; bTotal.type = 'button';
+  bTotal.textContent = '整張記一筆';
+  bTotal.addEventListener('click', () => commitInvTotal(p));
+  actions.appendChild(bTotal);
+
+  const bRescan = document.createElement('button');
+  bRescan.className = 'ghost-btn'; bRescan.type = 'button';
+  bRescan.textContent = '重新掃描';
+  bRescan.addEventListener('click', () => { box.hidden = true; startInvScan(); });
+  actions.appendChild(bRescan);
+
+  box.appendChild(actions);
+}
+
+function invAlreadyRecorded(invNum) {
+  return state.expenses.some((e) => e.inv && e.inv === invNum);
+}
+
+// Scanned records are pushed directly (not through appendExpenses) so identical
+// line items within one invoice aren't collapsed, and so we can tag each with
+// its source invoice number.
+function commitInvItems(p) {
+  if (invAlreadyRecorded(p.invNum) && !confirm('這張發票先前已掃描記帳過，仍要再加入一次嗎？')) return;
+  const date = p.date || todayStr();
+  let n = 0;
+  for (const it of p.items) {
+    state.expenses.push({
+      id: 'ex_' + genId(),
+      item: it.name,
+      amount: Math.round(it.price * it.qty * 100) / 100,
+      date,
+      category: '其他',
+      createdAt: todayStr(),
+      inv: p.invNum,
+    });
+    n++;
+  }
+  finalizeInvCommit(`已加入 ${n} 筆消費（發票 ${p.invNum}）。可在下方明細調整分類。`);
+}
+
+function commitInvTotal(p) {
+  if (invAlreadyRecorded(p.invNum) && !confirm('這張發票先前已掃描記帳過，仍要再加入一次嗎？')) return;
+  state.expenses.push({
+    id: 'ex_' + genId(),
+    item: `發票 ${p.invNum}`,
+    amount: Math.round((p.total || 0) * 100) / 100,
+    date: p.date || todayStr(),
+    category: '其他',
+    createdAt: todayStr(),
+    inv: p.invNum,
+  });
+  finalizeInvCommit(`已記入一筆 ${fmtMoney(p.total)}（發票 ${p.invNum}）。`);
+}
+
+function finalizeInvCommit(msg) {
+  saveState();
+  if (els.invResult) els.invResult.hidden = true;
+  renderExpenses();
+  render();
+  toast(msg);
+}
+
+if (els.invScanBtn) els.invScanBtn.addEventListener('click', startInvScan);
+if (els.invScanCancel) els.invScanCancel.addEventListener('click', cancelInvScan);
+if (els.invScanDone) els.invScanDone.addEventListener('click', () => { if (invLeft) finishInvScan(); });
+// Reveal the scan UI only where a native QR detector exists (hidden on iOS).
+invScanSupported().then((ok) => { if (ok && els.invScanSection) els.invScanSection.hidden = false; });
 
 // Input modal (新增記事)
 if (els.addInputBtn) els.addInputBtn.addEventListener('click', openInputModal);
