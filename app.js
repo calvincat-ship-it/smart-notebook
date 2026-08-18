@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.03';
+const APP_VERSION = 'v14.04';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -49,6 +49,7 @@ const OCR_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']; 
 // collapsed; tasks of tier 普通/可暫緩 default to collapsed (緊急 always expanded).
 const expandedCats = new WeakSet();  // category objects the user has expanded
 const expandedTasks = new Set();     // task ids the user has expanded
+let lowStackExpanded = false;        // whether the 可暫緩 stack is opened (session-only, starts collapsed)
 const editingCats = new WeakSet();   // categories whose name is being edited (via ✏️)
 let pendingEditCat = null;           // category to focus once it re-renders in edit mode
 const editingBullets = new Set();    // bullet ids being edited (via ✒); otherwise shown as links
@@ -1654,11 +1655,51 @@ function renderTasks() {
     return da.localeCompare(db);
   });
 
-  for (const { t, p } of withPri) {
+  // Render order: active 緊急/普通 cards, then the 可暫緩 stack (a single collapsed
+  // pile so many low-priority items don't clutter the view), then done cards.
+  const activeCards = withPri.filter((x) => !x.t.done && x.p.tier !== 'low');
+  const lowItems = withPri.filter((x) => !x.t.done && x.p.tier === 'low');
+  const doneCards = withPri.filter((x) => x.t.done);
+
+  for (const { t, p } of activeCards) els.tasksList.appendChild(buildTaskCard(t, p));
+  if (lowItems.length) els.tasksList.appendChild(buildLowStack(lowItems));
+  for (const { t, p } of doneCards) els.tasksList.appendChild(buildTaskCard(t, p));
+
+  function buildLowStack(items) {
+    const stack = document.createElement('div');
+    stack.className = 'low-stack' + (lowStackExpanded ? ' expanded' : '');
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'low-stack-head';
+    const caret = document.createElement('span');
+    caret.className = 'low-stack-caret';
+    caret.textContent = lowStackExpanded ? '▾' : '▸';
+    const label = document.createElement('span');
+    label.className = 'low-stack-label';
+    label.textContent = '🗂 可暫緩事項';
+    const count = document.createElement('span');
+    count.className = 'low-stack-count';
+    count.textContent = items.length + ' 則';
+    head.appendChild(caret);
+    head.appendChild(label);
+    head.appendChild(count);
+    head.addEventListener('click', () => { lowStackExpanded = !lowStackExpanded; renderTasks(); });
+    stack.appendChild(head);
+    if (lowStackExpanded) {
+      const body = document.createElement('div');
+      body.className = 'low-stack-body';
+      for (const { t, p } of items) body.appendChild(buildTaskCard(t, p));
+      stack.appendChild(body);
+    }
+    return stack;
+  }
+
+  function buildTaskCard(t, p) {
     const meta = TIER_META[p.tier];
     const item = document.createElement('div');
-    // 普通 / 可暫緩 cards collapse to just the badge + title; 緊急 stays open.
-    const collapsible = p.tier !== 'urgent';
+    // 普通 cards collapse to just the badge + title; 緊急 stays open; 可暫緩 shows
+    // as a full card inside the stack (the stack itself is the collapse control).
+    const collapsible = p.tier === 'normal';
     const expanded = !collapsible || expandedTasks.has(t.id);
     item.className = 'task-item ' + meta.cls + (t.done ? ' done' : '')
       + (collapsible ? ' collapsible' : '') + (collapsible && !expanded ? ' collapsed' : '');
@@ -1822,7 +1863,7 @@ function renderTasks() {
     item.appendChild(check);
     item.appendChild(main);
     item.appendChild(del);
-    els.tasksList.appendChild(item);
+    return item;
   }
 }
 
