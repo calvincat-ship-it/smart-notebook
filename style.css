@@ -265,18 +265,21 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 
 /* 可暫緩 stack — a single collapsed pile of low-priority cards */
 .low-stack { position: relative; margin-top: 4px; }
-.low-stack:not(.expanded) { margin-bottom: 12px; } /* room for the peeking cards behind */
+/* Collapsed: leave room above/left for the two peeking cards behind the front. */
+.low-stack:not(.expanded) { margin-top: 16px; }
 .low-stack-head {
   position: relative;
-  z-index: 1;
+  z-index: 3;               /* front card — sits above the two peeking cards */
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
+  /* same look as a 可暫緩 card: light-blue fill + blue left edge + card shadow */
+  border-left: 5px solid #3b82f6;
   border-radius: 12px;
-  background: var(--card);
+  background: #eff6ff;
+  box-shadow: var(--shadow);
   color: var(--ink);
   font: inherit;
   text-align: left;
@@ -286,19 +289,20 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .low-stack-caret { flex: 0 0 auto; color: var(--ink-soft); font-size: .8rem; }
 .low-stack-label { font-weight: 600; }
 .low-stack-count { margin-left: auto; flex: 0 0 auto; color: var(--ink-soft); font-size: .82rem; }
-/* Two offset cards peeking out behind the header → "stack of paper" look. */
-.low-stack:not(.expanded) .low-stack-head::before,
-.low-stack:not(.expanded) .low-stack-head::after {
+/* Two same-size cards tucked behind the front, each shifted up-left so only their
+   top-left corners peek out — the pile fans toward the bottom-right. */
+.low-stack:not(.expanded)::before,
+.low-stack:not(.expanded)::after {
   content: '';
   position: absolute;
-  left: 6px; right: 6px; top: 0; height: 100%;
-  border: 1px solid var(--line);
+  top: 0; left: 0; right: 0; bottom: 0;
+  border-left: 5px solid #3b82f6;
   border-radius: 12px;
-  background: var(--card);
-  z-index: -1;
+  background: #eff6ff;
+  box-shadow: var(--shadow);
 }
-.low-stack:not(.expanded) .low-stack-head::before { transform: translateY(4px) scaleX(.965); }
-.low-stack:not(.expanded) .low-stack-head::after { transform: translateY(8px) scaleX(.93); }
+.low-stack:not(.expanded)::before { transform: translate(-5px, -5px); z-index: 2; }  /* middle card */
+.low-stack:not(.expanded)::after  { transform: translate(-10px, -10px); z-index: 1; } /* back card */
 .low-stack-body { margin-top: 10px; }
 .low-stack-body .task-item:last-child { margin-bottom: 0; }
 .task-check {
