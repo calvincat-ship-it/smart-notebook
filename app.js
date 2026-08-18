@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.02';
+const APP_VERSION = 'v14.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1008,6 +1008,14 @@ async function processInput() {
       visionImages.map((v) => ({ media_type: v.media_type, data: v.data })),
     );
 
+    // Busy-day guard: if a new activity's date already has other activities, warn
+    // and only create notes + task cards after the user confirms. Abort keeps the
+    // input (text/drafts/files) untouched so the user can adjust and retry.
+    if (!confirmBusyDayConflicts(result)) {
+      toast('已取消建立，內容保留未變更。');
+      return;
+    }
+
     // categories: merge Claude's full set, preserving ids of unchanged bullets
     if (Array.isArray(result.categories)) {
       state.categories = mergeCategories(result.categories);
@@ -1129,6 +1137,43 @@ function appendTasks(tasks) {
       done: false,
     });
   }
+}
+
+function weekdayZh(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+  if (!m) return '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return '週' + '日一二三四五六'[d.getDay()];
+}
+
+// Busy-day guard: before creating anything from a 整理, look at the newly dated
+// activities (tasks with a dueDate that aren't already in the list) and see if
+// any land on a day that already holds other activities. If so, warn and let the
+// user decide — returns true to proceed, false to abort the whole creation.
+function confirmBusyDayConflicts(result) {
+  const incoming = (Array.isArray(result.tasks) ? result.tasks : [])
+    .filter((t) => t && t.task && /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate || ''))
+    .filter((t) => !state.tasks.some((x) => x.task === t.task && (x.dueDate || '') === t.dueDate));
+  if (!incoming.length) return true;
+
+  const byDate = new Map(); // date → { incoming:[names], existing:[task] }
+  for (const t of incoming) {
+    const existing = state.tasks.filter((x) => (x.dueDate || '') === t.dueDate);
+    if (!existing.length) continue;
+    if (!byDate.has(t.dueDate)) byDate.set(t.dueDate, { names: [], existing });
+    byDate.get(t.dueDate).names.push(t.task);
+  }
+  if (!byDate.size) return true;
+
+  let msg = '⚠ 這次要建立的活動，有日期與現有活動同一天：\n';
+  for (const d of [...byDate.keys()].sort()) {
+    const { names, existing } = byDate.get(d);
+    msg += `\n📅 ${d}（${weekdayZh(d)}）\n`;
+    msg += '　新增：' + names.join('、') + '\n';
+    msg += '　當天已有：' + existing.map((x) => x.task + (x.done ? '（已完成）' : '')).join('、') + '\n';
+  }
+  msg += '\n仍要建立筆記與任務卡片嗎？';
+  return confirm(msg);
 }
 
 // Consumption records Claude pulled out this batch. Append-only with dedupe by
