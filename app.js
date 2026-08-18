@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.05';
+const APP_VERSION = 'v14.06';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -50,6 +50,7 @@ const OCR_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']; 
 const expandedCats = new WeakSet();  // category objects the user has expanded
 const expandedTasks = new Set();     // task ids the user has expanded
 let lowStackExpanded = false;        // whether the 可暫緩 stack is opened (session-only, starts collapsed)
+let doneStackExpanded = false;       // whether the 已完成 stack is opened (session-only, starts collapsed)
 const editingCats = new WeakSet();   // categories whose name is being edited (via ✏️)
 let pendingEditCat = null;           // category to focus once it re-renders in edit mode
 const editingBullets = new Set();    // bullet ids being edited (via ✒); otherwise shown as links
@@ -1656,38 +1657,46 @@ function renderTasks() {
   });
 
   // Render order: active 緊急/普通 cards, then the 可暫緩 stack (a single collapsed
-  // pile so many low-priority items don't clutter the view), then done cards.
+  // pile so many low-priority items don't clutter the view), then the 已完成 stack.
   const activeCards = withPri.filter((x) => !x.t.done && x.p.tier !== 'low');
   const lowItems = withPri.filter((x) => !x.t.done && x.p.tier === 'low');
   const doneCards = withPri.filter((x) => x.t.done);
 
   for (const { t, p } of activeCards) els.tasksList.appendChild(buildTaskCard(t, p));
-  if (lowItems.length) els.tasksList.appendChild(buildLowStack(lowItems));
-  for (const { t, p } of doneCards) els.tasksList.appendChild(buildTaskCard(t, p));
+  if (lowItems.length) els.tasksList.appendChild(buildTaskStack(
+    lowItems, 'low-stack', '🗂 可暫緩事項', lowStackExpanded,
+    () => { lowStackExpanded = !lowStackExpanded; renderTasks(); },
+  ));
+  if (doneCards.length) els.tasksList.appendChild(buildTaskStack(
+    doneCards, 'done-stack', '✓ 已完成事項', doneStackExpanded,
+    () => { doneStackExpanded = !doneStackExpanded; renderTasks(); },
+  ));
 
-  function buildLowStack(items) {
+  // A collapsed pile of task cards (可暫緩 or 已完成). Colours come from CSS via the
+  // `kind` class; here we only build the shared structure.
+  function buildTaskStack(items, kind, labelText, isExpanded, onToggle) {
     const stack = document.createElement('div');
-    stack.className = 'low-stack' + (lowStackExpanded ? ' expanded' : '');
+    stack.className = kind + ' card-stack' + (isExpanded ? ' expanded' : '');
     const head = document.createElement('button');
     head.type = 'button';
-    head.className = 'low-stack-head';
+    head.className = 'card-stack-head';
     const caret = document.createElement('span');
-    caret.className = 'low-stack-caret';
-    caret.textContent = lowStackExpanded ? '▾' : '▸';
+    caret.className = 'card-stack-caret';
+    caret.textContent = isExpanded ? '▾' : '▸';
     const label = document.createElement('span');
-    label.className = 'low-stack-label';
-    label.textContent = '🗂 可暫緩事項';
+    label.className = 'card-stack-label';
+    label.textContent = labelText;
     const count = document.createElement('span');
-    count.className = 'low-stack-count';
+    count.className = 'card-stack-count';
     count.textContent = items.length + ' 則';
     head.appendChild(caret);
     head.appendChild(label);
     head.appendChild(count);
-    head.addEventListener('click', () => { lowStackExpanded = !lowStackExpanded; renderTasks(); });
+    head.addEventListener('click', onToggle);
     stack.appendChild(head);
-    if (lowStackExpanded) {
+    if (isExpanded) {
       const body = document.createElement('div');
-      body.className = 'low-stack-body';
+      body.className = 'card-stack-body';
       for (const { t, p } of items) body.appendChild(buildTaskCard(t, p));
       stack.appendChild(body);
     }
