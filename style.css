@@ -276,6 +276,8 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .task-item.done .task-check { background: var(--green); border-color: var(--green); color: #fff; }
 .task-main { flex: 1; min-width: 0; }
 .task-text { font-weight: 500; }
+.task-link { color: var(--accent); text-decoration: underline; overflow-wrap: anywhere; }
+.task-link:active { opacity: .7; }
 .task-meta { font-size: .8rem; color: var(--ink-soft); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .due-badge { color: var(--amber); font-weight: 600; }
 .autodel-note { color: var(--ink-soft); font-style: italic; }

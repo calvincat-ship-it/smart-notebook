@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.00';
+const APP_VERSION = 'v14.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1529,6 +1529,67 @@ async function openAttachment(att) {
   }
 }
 
+// Detect URLs, network folders, emails and Taiwan phone numbers inside plain
+// task text so they can be rendered as tappable links. The URL/file character
+// classes are ASCII-only on purpose, so a link stops at the first Chinese
+// character (task text has no spaces to lean on). Phone patterns are ordered
+// most-specific first. Kept global + reset per call since it's used synchronously.
+const LINKIFY_RE = new RegExp([
+  'https?:\\/\\/[\\w\\-._~:\\/?#\\[\\]@!$&\'()*+,;=%]+',   // http(s) URL (forms, meeting links, cloud folders)
+  'www\\.[\\w\\-._~:\\/?#\\[\\]@!$&\'()*+,;=%]+',          // bare www. link
+  'file:\\/\\/[\\w\\-._~:\\/?#\\[\\]@!$&\'()*+,;=%\\\\]+', // file:// path
+  '\\\\\\\\[A-Za-z0-9._$\\-\\\\]+',                        // UNC \\server\share (ASCII names only)
+  '[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}',  // email
+  '\\+886[-\\s]?9\\d{2}[-\\s]?\\d{3}[-\\s]?\\d{3}',        // +886 mobile
+  '\\+886[-\\s]?\\d{1,2}[-\\s]?\\d{3,4}[-\\s]?\\d{4}',     // +886 landline
+  '09\\d{2}[-\\s]?\\d{3}[-\\s]?\\d{3}',                    // 09xx-xxx-xxx mobile
+  '0800[-\\s]?\\d{3}[-\\s]?\\d{3}',                        // 0800 toll-free
+  '\\(0\\d{1,2}\\)[-\\s]?\\d{3,4}[-\\s]?\\d{4}',           // (0x)xxxx-xxxx landline
+  '0\\d{1,2}[-\\s]?\\d{3,4}[-\\s]?\\d{4}',                 // 0x-xxxx-xxxx landline
+].join('|'), 'g');
+
+// Turn one matched token into an { href, external } descriptor.
+function linkifyHref(m) {
+  if (/^https?:\/\//i.test(m)) return { href: m, external: true };
+  if (/^www\./i.test(m)) return { href: 'https://' + m, external: true };
+  if (/^file:\/\//i.test(m)) return { href: m, external: true };
+  if (/^\\\\/.test(m)) return { href: 'file:' + m.replace(/\\/g, '/'), external: true };
+  if (m.includes('@')) return { href: 'mailto:' + m, external: false };
+  return { href: 'tel:' + m.replace(/[^\d+]/g, ''), external: false };
+}
+
+// Append `text` into `el`, wrapping any detected link/phone in an <a>. Built
+// from DOM text nodes (never innerHTML) so surrounding text can't inject markup.
+function linkifyInto(el, text) {
+  const s = (text == null) ? '' : String(text);
+  LINKIFY_RE.lastIndex = 0;
+  let last = 0, m;
+  while ((m = LINKIFY_RE.exec(s)) !== null) {
+    if (m[0].length === 0) { LINKIFY_RE.lastIndex++; continue; }
+    const start = m.index;
+    if (start > last) el.appendChild(document.createTextNode(s.slice(last, start)));
+    let token = m[0];
+    let trailing = '';
+    // Strip trailing sentence punctuation that greedily attached to a URL/email.
+    if (!/^[\d(+]/.test(token)) {
+      const tm = token.match(/[.,;:!?、，。）)】」』]+$/);
+      if (tm) { trailing = tm[0]; token = token.slice(0, -trailing.length); }
+    }
+    const info = linkifyHref(token);
+    const a = document.createElement('a');
+    a.className = 'task-link';
+    a.href = info.href;
+    a.textContent = token;
+    if (info.external) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+    a.addEventListener('click', (e) => e.stopPropagation()); // never toggle the card
+    el.appendChild(a);
+    if (trailing) el.appendChild(document.createTextNode(trailing));
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) el.appendChild(document.createTextNode(s.slice(last)));
+  if (!el.childNodes.length) el.appendChild(document.createTextNode(s));
+}
+
 function renderTasks() {
   enforceUrgentOverrides(); // drop stale 普通/可暫緩 overrides on now-auto-urgent tasks
   const pending = state.tasks;
@@ -1621,7 +1682,7 @@ function renderTasks() {
 
     const text = document.createElement('div');
     text.className = 'task-text';
-    text.textContent = t.task;
+    linkifyInto(text, t.task); // URLs/phones/emails in the task become tappable links
 
     // Tapping the card (but not its interactive controls) expands/collapses.
     if (collapsible) {
