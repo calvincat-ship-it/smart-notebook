@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.01';
+const APP_VERSION = 'v14.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -45,13 +45,14 @@ let pendingFiles = [];       // [{ ref, name, type, size, blob }] from 📎 附�
 let attachedPdf = null;      // { ref, name, type, size, blob, text } from 📄 上傳 PDF (text-extracted; kept only if user confirms)
 let ocrImages = [];          // [{ ref, name, type, size, blob }] from 🖼 圖片輸入 (sent to Claude's vision for OCR; kept only if user confirms)
 const OCR_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']; // formats the Anthropic vision API accepts
-let pendingFocus = null;     // category index whose newly-added item should get focus
 // Collapse/expand UI state (session-only, not persisted). Categories default to
 // collapsed; tasks of tier 普通/可暫緩 default to collapsed (緊急 always expanded).
 const expandedCats = new WeakSet();  // category objects the user has expanded
 const expandedTasks = new Set();     // task ids the user has expanded
 const editingCats = new WeakSet();   // categories whose name is being edited (via ✏️)
 let pendingEditCat = null;           // category to focus once it re-renders in edit mode
+const editingBullets = new Set();    // bullet ids being edited (via ✒); otherwise shown as links
+let pendingEditBullet = null;        // bullet id to focus once it re-renders in edit mode
 
 /* ---------------- Attachment blob store (IndexedDB) ---------------- */
 // localStorage can't hold binary; blobs are cached here keyed by attachment id.
@@ -1900,14 +1901,40 @@ function renderCategories(orphans) {
         handle.title = '按住拖曳到其他分類';
         handle.addEventListener('pointerdown', (e) => startBulletDrag(e, { cat, sub, bi, bulletId: b.id, text: b.text }));
 
+        // Two modes, mirroring the category-title pattern (v12.04): by default the
+        // note is a read-only span whose URLs/phones/emails are tappable links;
+        // the ✒ button switches it to plain editable text so links can't fight
+        // with "tap to edit". Editing commits on blur/Enter (empty → delete).
+        const editingBullet = editingBullets.has(b.id);
         const span = document.createElement('span');
         span.className = 'bullet-text';
-        span.contentEditable = 'true';
-        span.textContent = b.text;
-        span.addEventListener('blur', () => {
-          const v = span.textContent.trim();
-          if (v) { b.text = v; saveState(); }
-          else { removeBulletsByIds([b.id]); saveState(); render(); }
+        if (editingBullet) {
+          span.contentEditable = 'true';
+          span.textContent = b.text;
+          const commit = () => {
+            editingBullets.delete(b.id);
+            const v = span.textContent.trim();
+            if (v) { b.text = v; saveState(); renderCategories(); }
+            else { removeBulletsByIds([b.id]); saveState(); render(); }
+          };
+          span.addEventListener('blur', commit);
+          span.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); span.blur(); }
+          });
+        } else {
+          linkifyInto(span, b.text);
+        }
+
+        const bEdit = document.createElement('button');
+        bEdit.className = 'bullet-edit';
+        bEdit.textContent = '✒';
+        bEdit.title = '編輯這一條';
+        bEdit.setAttribute('aria-label', '編輯這一條');
+        bEdit.hidden = editingBullet;
+        bEdit.addEventListener('click', () => {
+          editingBullets.add(b.id);
+          pendingEditBullet = b.id;
+          renderCategories();
         });
 
         const bDel = document.createElement('button');
@@ -1924,8 +1951,15 @@ function renderCategories(orphans) {
 
         row.appendChild(handle);
         row.appendChild(span);
+        row.appendChild(bEdit);
         row.appendChild(bDel);
         li.appendChild(row);
+
+        // Just entered edit mode for this bullet → focus & place caret at the end.
+        if (editingBullet && b.id === pendingEditBullet) {
+          pendingEditBullet = null;
+          setTimeout(() => { span.focus(); placeCaretEnd(span); }, 0);
+        }
 
         // Files attached to this note item.
         const atts = attachmentsForBullet(b.id);
@@ -1981,15 +2015,6 @@ function renderCategories(orphans) {
     els.categoriesList.appendChild(box);
   }
 
-  if (pendingFocus != null) {
-    const card = els.categoriesList.querySelector(`.category[data-ci="${pendingFocus}"]`);
-    if (card) {
-      const texts = card.querySelectorAll('.bullet-text');
-      const last = texts[texts.length - 1];
-      if (last) { last.focus(); placeCaretEnd(last); }
-    }
-    pendingFocus = null;
-  }
 }
 
 /* ---------------- Category editing helpers ---------------- */
@@ -2010,8 +2035,10 @@ function cleanupEmptySub(cat, sub) {
 function addItem(cat) {
   expandedCats.add(cat); // keep it open so the new (focused) item is visible
   const s = getGeneralSub(cat);
-  s.bullets.push({ id: genId(), text: '' });
-  pendingFocus = state.categories.indexOf(cat);
+  const id = genId();
+  s.bullets.push({ id, text: '' });
+  editingBullets.add(id);   // new item starts editable + focused (via pendingEditBullet)
+  pendingEditBullet = id;
   saveState();
   renderCategories();
 }

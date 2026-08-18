@@ -369,6 +369,9 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
 .bullet-text:focus { outline: 1px solid var(--accent); background: #fff; }
 .bullet-del { border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; }
 .bullet:hover .bullet-del { color: var(--ink-soft); }
+.bullet-edit { border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; padding: 0 2px; }
+.bullet:hover .bullet-edit { color: var(--ink-soft); }
+.bullet-edit:active { color: var(--accent); }
 
 /* Drag-and-drop */
 .drag-ghost {
