@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.06';
+const APP_VERSION = 'v14.07';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -799,8 +799,11 @@ async function callClaude(userInput, batchAttachments, visionImages) {
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.json()).error?.message || ''; } catch (e) { /* ignore */ }
-    if (ep.relay && (res.status === 401 || res.status === 403)) {
-      throw new Error('中繼站拒絕：存取碼錯誤，或此網域未被中繼站允許。');
+    if (ep.relay && res.status === 403) {
+      throw new Error('中繼站拒絕（403）：存取碼不符，或中繼站未設存取碼。請核對設定裡的存取碼與中繼站的 APP_ACCESS_CODE 是否一致。');
+    }
+    if (ep.relay && res.status === 401) {
+      throw new Error('中繼站的金鑰失效（401）：中繼站保管的 Anthropic 金鑰無效或過期，需由中繼站管理者更新。');
     }
     if (!ep.relay && res.status === 401) throw new Error('API 金鑰無效，請到設定重新確認。');
     if (res.status === 429) throw new Error('請求太頻繁或額度不足，請稍後再試。');
