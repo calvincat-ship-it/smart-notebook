@@ -14,24 +14,33 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v16.00';
+const APP_VERSION = 'v16.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
-const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata';
+// drive.appdata = the app's private hidden folder (notes/tasks + small attachments).
+// drive.file    = only files the app itself creates/opens in the user's visible
+//                 Drive — used to upload big files there and get a shareable link.
+//                 Adding this scope triggers a one-time Google re-consent prompt.
+const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const CLOUD_FILENAME = 'notebook-backup.json';
 
 // Attachments: any file type, capped at 100MB each. The binary lives locally in
 // IndexedDB and, when cloud sync is on, as its own file in the Drive
 // appDataFolder (so the frequently-synced JSON bundle stays small). The bundle
 // only carries lightweight metadata (id/name/type/size/driveFileId/link).
-// Plain attachments (📎 附加、筆記本分類上傳、拍照、任務卡片附加) — capped at
-// 100MB each and uploaded to Drive with a resilient resumable upload. The binary
-// no longer lives permanently on every device: Drive is the source of truth and
-// the local IndexedDB copy is a bounded LRU cache (see cache* below), so a large
-// total (~GBs) doesn't fill up a phone.
-const MAX_ATTACH_BYTES = 100 * 1024 * 1024;
+// In-app attachments (📎 附加、筆記本分類上傳、拍照、任務卡片附加) go to the app's
+// private appDataFolder and are capped at 10MB — small, everyday files that sync
+// seamlessly and ride along in the app's backup. Their local IndexedDB copy is a
+// bounded LRU cache (see cache* below). Larger files (up to 100MB) take a
+// separate path: the app uploads them to the user's OWN visible Drive with
+// drive.file and stores just a link (see addCategoryBigFiles) — the user opts in
+// to sharing, and the app doesn't have to babysit a 100MB transfer/backup.
+const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACH_MB = Math.round(MAX_ATTACH_BYTES / 1024 / 1024);
+// Big files that go to the user's visible Drive as a link.
+const MAX_BIGFILE_BYTES = 100 * 1024 * 1024;
+const MAX_BIGFILE_MB = Math.round(MAX_BIGFILE_BYTES / 1024 / 1024);
 // OCR images are sent to Claude's vision API, which rejects very large images, so
 // they keep a smaller, separate cap regardless of the attachment cap.
 const MAX_OCR_BYTES = 10 * 1024 * 1024;
@@ -260,6 +269,9 @@ function normalizeState(s) {
     driveFileId: a.driveFileId || '',
     addedAt: a.addedAt || '',
     linkedItemIds: Array.isArray(a.linkedItemIds) ? a.linkedItemIds.filter((x) => typeof x === 'string') : [],
+    // LINK attachments (a big file in the user's visible Drive): carry the extra
+    // fields so they survive load/restore. Absent on normal appDataFolder files.
+    ...(a.kind === 'link' ? { kind: 'link', url: a.url || '', shared: !!a.shared } : {}),
   }));
   // Expenses: consumption records pulled out of the notes by Claude. They live
   // here (not in categories), and only surface in the 記帳 view.
@@ -360,6 +372,7 @@ function loadCloudState() {
     deviceId: c.deviceId || 'dev_' + Math.random().toString(36).slice(2, 10),
     pendingBackup: !!c.pendingBackup,
     backupFailed: !!c.backupFailed,
+    uploadFolderId: c.uploadFolderId || '', // My Drive folder for big-file uploads (drive.file)
   };
 }
 function saveCloudState() {
@@ -1433,12 +1446,13 @@ async function addCategoryAttachments(cat, files) {
   if (!cat.id) cat.id = 'cat_' + genId();
   setLoading(true);
   try {
-    let added = 0, skipped = 0;
+    let added = 0, skipped = 0, tooBig = 0;
     for (const file of files) {
-      if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 ${MAX_ATTACH_MB}MB，無法上傳。`); skipped++; continue; }
+      if (file.size > MAX_ATTACH_BYTES) { tooBig++; skipped++; continue; }
       await createAttachment({ blob: file, name: file.name, type: file.type || '', size: file.size }, [cat.id]);
       added++;
     }
+    if (tooBig) toast(`有 ${tooBig} 個檔案超過 ${MAX_ATTACH_MB}MB —— 大檔請改用「☁️ 大檔上傳」（存到你的雲端硬碟）。`);
     if (added) {
       expandedCats.add(cat); // keep the category open so the new file is visible
       saveState();
@@ -1457,6 +1471,11 @@ async function addCategoryAttachments(cat, files) {
 function setLoading(on) {
   els.loadingOverlay.hidden = !on;
   els.processBtn.disabled = on;
+  if (!on) setLoadingText(''); // restore the default label when the overlay hides
+}
+// Override the loading overlay's caption (e.g. upload progress); '' restores default.
+function setLoadingText(msg) {
+  if (els.loadingText) els.loadingText.textContent = msg || 'Claude 整理中…';
 }
 
 /* ---------------- Google Calendar link ---------------- */
@@ -1581,8 +1600,11 @@ function bulletExists(id) {
   return false;
 }
 
-// Remove a file's local blob and (best-effort) its Drive copy.
+// Remove a file's local blob and (best-effort) its appDataFolder copy. A LINK
+// attachment points at a file in the user's OWN visible Drive — we never delete
+// that here (the user manages it); removing the link just drops our record.
 function purgeAttachment(att) {
+  if (att.kind === 'link') return;
   cacheDelete(att.id).catch(() => {});
   if (att.driveFileId && cloudState.enabled) driveDelete(att.driveFileId).catch(() => {});
 }
@@ -1710,21 +1732,31 @@ function setPage(page) {
 /* ---------------- Attachment chip + open/download ---------------- */
 function makeAttachChip(att, opts) {
   opts = opts || {};
+  const isLink = att.kind === 'link';
   const chip = document.createElement('span');
-  chip.className = 'attach-chip saved';
+  chip.className = 'attach-chip saved' + (isLink ? ' link-chip' : '');
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'attach-open';
-  open.textContent = `${fileIcon(att.type, att.name)} ${att.name}`;
-  open.title = '開啟附件';
-  open.addEventListener('click', () => openAttachment(att));
+  // A link chip shows a 🔗 (plus 🌐 when shared) and opens the Drive link in a tab.
+  const icon = isLink ? (att.shared ? '🔗🌐' : '🔗') : fileIcon(att.type, att.name);
+  open.textContent = `${icon} ${att.name}`;
+  open.title = isLink ? (att.shared ? '雲端硬碟檔案（可分享）— 點開' : '雲端硬碟檔案（私人）— 點開') : '開啟附件';
+  open.addEventListener('click', () => {
+    if (isLink) {
+      if (att.url) window.open(att.url, '_blank', 'noopener');
+      else toast('這個雲端連結遺失了，請到 Google Drive 查看。');
+    } else {
+      openAttachment(att);
+    }
+  });
   chip.appendChild(open);
   if (opts.removable) {
     const rm = document.createElement('button');
     rm.type = 'button';
     rm.className = 'attach-rm';
     rm.textContent = '✕';
-    rm.title = '刪除附件';
+    rm.title = isLink ? '移除此雲端連結' : '刪除附件';
     rm.addEventListener('click', () => deleteAttachmentById(att.id));
     chip.appendChild(rm);
   }
@@ -1734,6 +1766,18 @@ function makeAttachChip(att, opts) {
 function deleteAttachmentById(id) {
   const att = state.attachments.find((a) => a.id === id);
   if (!att) return;
+  if (att.kind === 'link') {
+    // The file lives in the user's own visible Drive — offer to remove just the
+    // link (keep the file) or also delete the Drive file.
+    const alsoDelete = confirm(
+      `移除雲端連結「${att.name}」。\n\n・按「確定」＝同時刪除 Google Drive 上的檔案\n・按「取消」＝只移除這裡的連結，Drive 檔案保留`
+    );
+    state.attachments = state.attachments.filter((a) => a.id !== id);
+    if (alsoDelete && att.driveFileId && cloudState.enabled) driveDeleteFile(att.driveFileId);
+    saveState();
+    render();
+    return;
+  }
   if (!confirm(`刪除附件「${att.name}」？此動作無法復原。`)) return;
   state.attachments = state.attachments.filter((a) => a.id !== id);
   purgeAttachment(att);
@@ -2028,7 +2072,7 @@ function renderTasks() {
     attachBtn.type = 'button';
     attachBtn.className = 'cal-btn task-attach-btn';
     attachBtn.textContent = '📎 附加檔案';
-    attachBtn.title = '任何格式、單檔上限 100MB，原樣保留（Claude 不讀內容）。點 ℹ️ 看完整說明。';
+    attachBtn.title = '任何格式、單檔上限 10MB，原樣保留（Claude 不讀內容）。更大的檔請用筆記本分類的「☁️ 大檔上傳」。點 ℹ️ 看完整說明。';
     const attachHelp = document.createElement('button');
     attachHelp.type = 'button';
     attachHelp.className = 'cal-btn task-attach-help';
@@ -2345,10 +2389,26 @@ function renderCategories(orphans) {
       if (files.length) await addCategoryAttachments(cat, files);
     });
 
+    // ☁️ 大檔上傳 — files up to 100MB go to the user's OWN visible Drive (drive.file)
+    // and are stored here as a shareable link, not in the app's private folder.
+    const bigBtn = document.createElement('button');
+    bigBtn.className = 'add-item-btn cat-bigfile-btn';
+    bigBtn.textContent = '☁️ 大檔上傳';
+    bigBtn.title = `超過 ${MAX_ATTACH_MB}MB 的大檔／要分享的檔案：上傳到你自己的 Google 雲端硬碟（可選擇是否分享），最大 ${MAX_BIGFILE_MB}MB。`;
+    const bigInput = document.createElement('input');
+    bigInput.type = 'file'; bigInput.multiple = true; bigInput.hidden = true;
+    bigBtn.addEventListener('click', () => bigInput.click());
+    bigInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []); bigInput.value = '';
+      if (files.length) await addCategoryBigFiles(cat, files);
+    });
+
     actions.appendChild(upBtn);
     actions.appendChild(camBtn);
+    actions.appendChild(bigBtn);
     actions.appendChild(upInput);
     actions.appendChild(camInput);
+    actions.appendChild(bigInput);
     bodyEl.appendChild(actions);
 
     card.appendChild(head);
@@ -2674,18 +2734,20 @@ async function driveUpload(fileId, name, obj) {
 
 // Attachment binaries — each its own appDataFolder file. Binary is preserved by
 // building the multipart body as a Blob (text parts + the raw file Blob).
-// Upload an attachment binary with Drive's RESUMABLE protocol. A single
-// multipart POST is fragile for large files (a dropped mobile connection loses
-// the whole thing); resumable sends the file in chunks over a session URI and
-// retries a failed chunk from the server-reported offset. Handles files up to
-// 100MB reliably. Returns { id }.
-async function driveUploadBlob(fileId, name, blob) {
-  const meta = fileId ? { name } : { name, parents: ['appDataFolder'] };
-  const startUrl = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable&fields=id`
-    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id`;
-  const start = await driveFetch(startUrl, {
-    method: fileId ? 'PATCH' : 'POST',
+// Upload a binary with Drive's RESUMABLE protocol. A single multipart POST is
+// fragile for large files (a dropped mobile connection loses the whole thing);
+// resumable sends the file in chunks over a session URI and retries a failed
+// chunk from the server-reported offset. `opts.parents` targets a folder
+// (['appDataFolder'] for the private store, a folder id for visible My Drive,
+// or omitted for My Drive root); `opts.fields` picks the returned fields;
+// `opts.onProgress(fraction)` reports progress. Returns the file resource.
+async function driveResumableUpload(name, blob, opts) {
+  opts = opts || {};
+  const fields = opts.fields || 'id';
+  const meta = { name };
+  if (opts.parents) meta.parents = opts.parents;
+  const start = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=${encodeURIComponent(fields)}`, {
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json; charset=UTF-8',
       'X-Upload-Content-Type': blob.type || 'application/octet-stream',
@@ -2700,9 +2762,8 @@ async function driveUploadBlob(fileId, name, blob) {
   const CHUNK = 8 * 1024 * 1024;         // 8MB (a multiple of 256KB, as Drive requires)
   const total = blob.size;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  // A zero-length file still needs one PUT to finalize the session.
   let offset = 0;
-  while (offset < total || total === 0) {
+  while (offset < total || total === 0) {  // a zero-length file still needs one PUT
     const end = Math.min(offset + CHUNK, total);
     const chunk = blob.slice(offset, end);
     const range = total === 0 ? `bytes */0` : `bytes ${offset}-${end - 1}/${total}`;
@@ -2712,8 +2773,8 @@ async function driveUploadBlob(fileId, name, blob) {
       // The session URI is pre-authorized, so no Authorization header here.
       try { res = await fetch(session, { method: 'PUT', headers: { 'Content-Range': range }, body: chunk }); }
       catch (e) { await sleep(600 * (attempt + 1)); continue; } // network blip → retry same chunk
-      if (res.status === 200 || res.status === 201) { return res.json(); } // finished
-      if (res.status === 308) {                                            // chunk accepted, more to go
+      if (res.status === 200 || res.status === 201) { if (opts.onProgress) opts.onProgress(1); return res.json(); }
+      if (res.status === 308) {                                  // chunk accepted, more to go
         const r = res.headers.get('Range');
         const m = r && /-(\d+)$/.exec(r);
         offset = m ? (parseInt(m[1], 10) + 1) : end;
@@ -2722,12 +2783,122 @@ async function driveUploadBlob(fileId, name, blob) {
       }
       if (res.status === 401) { gisToken = null; await getAccessToken('none'); await sleep(300); continue; }
       if (res.status >= 500) { await sleep(600 * (attempt + 1)); continue; } // transient server error
-      throw new Error('上傳附件失敗（' + res.status + '）。');
+      throw new Error('上傳失敗（' + res.status + '）。');
     }
-    if (!done) throw new Error('上傳附件中斷，請稍後再試（網路不穩）。');
+    if (!done) throw new Error('上傳中斷，請稍後再試（網路不穩）。');
+    if (opts.onProgress && total > 0) opts.onProgress(offset / total);
     if (total === 0) break;
   }
   throw new Error('上傳完成但未取得檔案編號。');
+}
+
+// The app's private appDataFolder attachment upload (small files ≤10MB).
+function driveUploadBlob(fileId, name, blob) {
+  // fileId (overwrite an existing file) is unused now that names are unique per
+  // attachment; kept in the signature for callers. New file → appDataFolder.
+  return driveResumableUpload(name, blob, { parents: ['appDataFolder'] });
+}
+
+const BIGFILE_FOLDER_NAME = '智慧記事本附件';
+// Find (or create) a folder in the user's visible My Drive to keep big-file
+// uploads tidy. drive.file lets the app see only folders it created, so a cached
+// id that no longer resolves is simply recreated. Returns a folder id, or ''
+// (fall back to My Drive root) if folder handling fails.
+async function ensureUploadFolder() {
+  const mk = async () => {
+    const res = await driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ name: BIGFILE_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' }),
+    });
+    if (!res.ok) return '';
+    return (await res.json()).id || '';
+  };
+  if (cloudState.uploadFolderId) {
+    // Verify it still exists and isn't trashed.
+    const chk = await driveFetch(`https://www.googleapis.com/drive/v3/files/${cloudState.uploadFolderId}?fields=id,trashed`, {});
+    if (chk.ok) { const j = await chk.json(); if (j && j.id && !j.trashed) return cloudState.uploadFolderId; }
+  }
+  const id = await mk();
+  if (id) { cloudState.uploadFolderId = id; saveCloudState(); }
+  return id;
+}
+
+// Read a file's shareable link (and its size) after an upload.
+async function driveFileMeta(fileId) {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,size,webViewLink`, {});
+  if (!res.ok) throw new Error('讀取檔案連結失敗（' + res.status + '）。');
+  return res.json();
+}
+
+// Make a file readable by anyone with the link (only when the user opts in).
+async function driveShareAnyone(fileId) {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=id`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+  });
+  if (!res.ok) throw new Error('設定分享權限失敗（' + res.status + '）。');
+  return true;
+}
+
+// Delete a visible-Drive file the app created (used when removing a link the user
+// asks to also delete). Best-effort.
+async function driveDeleteFile(fileId) {
+  try { await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: 'DELETE' }); } catch (e) { /* ignore */ }
+}
+
+// Big-file path: upload each file to the user's visible My Drive, optionally share
+// it, and store a LINK attachment (no local blob, no appDataFolder) on the category.
+async function addCategoryBigFiles(cat, files) {
+  if (!cloudState.enabled) { toast('請先在設定連結 Google 帳號，才能上傳大檔到雲端硬碟。'); return; }
+  if (!cat.id) cat.id = 'cat_' + genId();
+  // Ask about sharing once for the whole batch (the user chooses).
+  let share = false;
+  const bigList = files.filter((f) => f.size <= MAX_BIGFILE_BYTES);
+  if (!bigList.length) { toast(`檔案超過 ${MAX_BIGFILE_MB}MB，無法上傳。`); return; }
+  share = confirm('上傳後要讓「知道連結的人都能檢視」以便分享嗎？\n\n・按「確定」＝可分享（任何人有連結就能開）\n・按「取消」＝只有你自己能開（日後仍可到 Drive 再分享）');
+  setLoading(true);
+  try {
+    const folderId = await ensureUploadFolder();
+    let added = 0;
+    for (const file of files) {
+      if (file.size > MAX_BIGFILE_BYTES) { toast(`「${file.name}」超過 ${MAX_BIGFILE_MB}MB，略過。`); continue; }
+      setLoadingText(`上傳「${file.name}」到雲端硬碟…`);
+      const up = await driveResumableUpload(file.name, file, {
+        parents: folderId ? [folderId] : undefined,
+        fields: 'id,name,size,webViewLink',
+        onProgress: (fr) => setLoadingText(`上傳「${file.name}」…${Math.round(fr * 100)}%`),
+      });
+      let link = up.webViewLink;
+      if (!link) { try { link = (await driveFileMeta(up.id)).webViewLink; } catch (e) { /* keep going */ } }
+      if (share) { try { await driveShareAnyone(up.id); } catch (e) { toast('分享權限設定失敗，檔案仍已上傳（可稍後在 Drive 手動分享）。'); } }
+      state.attachments.push({
+        id: genId(),
+        kind: 'link',
+        name: file.name,
+        type: file.type || '',
+        size: file.size,
+        driveFileId: up.id,
+        url: link || '',
+        shared: !!share,
+        addedAt: new Date().toISOString(),
+        linkedItemIds: [cat.id],
+      });
+      added++;
+    }
+    if (added) {
+      expandedCats.add(cat);
+      saveState();
+      render();
+      toast(added > 1 ? `已上傳 ${added} 個大檔到雲端硬碟 ✓` : '已上傳到雲端硬碟 ✓');
+    }
+  } catch (err) {
+    toast('大檔上傳失敗：' + (err.message || err));
+  } finally {
+    setLoadingText('');
+    setLoading(false);
+  }
 }
 
 // Fetch one attachment's binary from Drive, self-healing a stale driveFileId.

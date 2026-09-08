@@ -495,7 +495,12 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
 .cat-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .cat-actions .add-item-btn { margin-top: 8px; }
 .cat-upload-btn { color: var(--accent); border-color: var(--accent-soft); }
+.cat-bigfile-btn { color: #0369a1; border-color: #bae6fd; background: #f0f9ff; }
 .cat-attach { margin-top: 10px; }
+/* Link chip (a big file in the user's visible Drive) — tinted to stand apart from
+   the app's own inline attachments. */
+.attach-chip.link-chip { background: #f0f9ff; border-color: #bae6fd; }
+.attach-chip.link-chip .attach-open { color: #0369a1; }
 .head-btns { display: flex; gap: 14px; align-items: center; }
 
 /* Modal */
