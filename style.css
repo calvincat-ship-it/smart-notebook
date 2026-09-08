@@ -207,6 +207,33 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 .section-title { font-size: 1.05rem; margin: 0 0 10px; }
 .link-btn { border: none; background: none; color: var(--ink-soft); font-size: .85rem; cursor: pointer; }
 
+/* Sub-page tabs (待辦任務 / 筆記本) */
+.tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-top: 18px;
+  padding: 4px;
+  background: var(--accent-soft);
+  border-radius: 12px;
+}
+.tab-btn {
+  flex: 1;
+  border: none;
+  background: none;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: .92rem;
+  font-weight: 600;
+  padding: 9px 8px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.tab-btn.active { background: var(--card); color: var(--accent); box-shadow: var(--shadow); }
+
+/* Per-page empty line (shown on an active page that has no items yet) */
+.page-empty { color: var(--ink-soft); font-size: .9rem; text-align: center; padding: 24px 12px; margin: 0; }
+
 /* Tasks */
 .task-item {
   background: var(--card);
@@ -344,6 +371,7 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .task-del { border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: 1rem; padding: 0 4px; }
 .task-attach-btn { font-family: inherit; line-height: 1.4; }
+.task-move-btn { font-family: inherit; line-height: 1.4; }
 .task-attach-help { font-family: inherit; line-height: 1.4; padding: 3px 7px; }
 
 /* Attachment-help modal text */
@@ -423,6 +451,9 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
 .bullet-edit { border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; padding: 0 2px; }
 .bullet:hover .bullet-edit { color: var(--ink-soft); }
 .bullet-edit:active { color: var(--accent); }
+.bullet-move { border: none; background: none; cursor: pointer; font-size: .82rem; padding: 0 2px; opacity: .55; }
+.bullet:hover .bullet-move { opacity: 1; }
+.bullet-move:active { transform: scale(.9); }
 
 /* Drag-and-drop */
 .drag-ghost {

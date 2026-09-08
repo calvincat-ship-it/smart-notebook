@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v14.07';
+const APP_VERSION = 'v15.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -55,6 +55,11 @@ const editingCats = new WeakSet();   // categories whose name is being edited (v
 let pendingEditCat = null;           // category to focus once it re-renders in edit mode
 const editingBullets = new Set();    // bullet ids being edited (via ✒); otherwise shown as links
 let pendingEditBullet = null;        // bullet id to focus once it re-renders in edit mode
+// Which sub-page is showing. 待辦任務 is the home page; 筆記本 is the other.
+// Session-only (starts on tasks each open), like the other view-state above.
+let currentPage = 'tasks';           // 'tasks' | 'notes'
+// Fixed landing category for a task the user manually converts into a note.
+const UNCAT_TITLE = '📥 未分類';
 
 /* ---------------- Attachment blob store (IndexedDB) ---------------- */
 // localStorage can't hold binary; blobs are cached here keyed by attachment id.
@@ -300,6 +305,9 @@ const els = {
   draftsList: $('draftsList'),
   draftsCount: $('draftsCount'),
   emptyHint: $('emptyHint'),
+  tabBar: $('tabBar'),
+  tabTasks: $('tabTasks'),
+  tabNotes: $('tabNotes'),
   tasksSection: $('tasksSection'),
   tasksList: $('tasksList'),
   categoriesSection: $('categoriesSection'),
@@ -637,9 +645,8 @@ function buildSchema(hasAttachments) {
             dueDate: { type: 'string' },
             importance: { type: 'string', enum: ['high', 'medium', 'low'] },
             sourceCategory: { type: 'string' },
-            linkedBullets: { type: 'array', items: { type: 'string' } },
           },
-          required: ['task', 'dueDate', 'importance', 'sourceCategory', 'linkedBullets'],
+          required: ['task', 'dueDate', 'importance', 'sourceCategory'],
           additionalProperties: false,
         },
       },
@@ -681,16 +688,29 @@ function buildSchema(hasAttachments) {
 
 const SYSTEM_PROMPT = [
   '你是一個上班族的記事本整理助理。使用者會提供零散的內容（打字、語音轉文字、或 PDF 文件文字）。',
-  '你的工作：',
-  '1. 把內容整理成「有邏輯層次的階層式標題與條列」。分類的類別（categories 的 title）由你自行決定，不需要問使用者。相近的內容歸到同一類，每一類底下用 subsections（子標題 heading + 條列 bullets）呈現。',
-  '2. 從內容中找出「需要執行的任務」與「截止日期」，放進 tasks。dueDate 一律用 YYYY-MM-DD 格式；若內容沒有明確日期就留空字串。相對日期（例如「下週三」「月底前」）請依照使用者提供的今天日期換算成實際日期。',
-  '   每個任務還要判斷 importance（重要性），值只能是 high / medium / low：依「任務本身的影響與後果」判斷——攸關考核／法規期限／對他人有重大影響＝high；例行、可有可無、影響很小＝low；其餘＝medium。importance 只看任務本身的份量，不要把「時間急不急」算進去（急迫程度由 App 依截止日另外計算）。',
+  '這個 App 有兩個地方放內容：「待辦任務」（tasks）與「筆記本」（categories）。',
+  '',
+  '最重要的原則——每一則內容只能放一邊，兩邊內容「絕不重複」：',
+  '● 有「明確需要辦理的事項」＝需要使用者去做某個動作（例如：要交／繳／回覆／完成／出席／聯絡／準備／繳交／報名／付款前置作業等，通常帶有期限或明確動作）→ 放進 tasks，「不要」再放進 categories。',
+  '● 沒有明確需辦理動作的內容＝參考資料、記錄、想法、心得、聯絡資訊、清單、會議記錄、知識整理等 → 整理進 categories（筆記本），「不要」放進 tasks。',
+  '判斷不確定時，若讀起來像「一件要去做的事」就當 task，像「一則要記住／參考的資訊」就當筆記。同一件事不可同時出現在 tasks 和 categories。',
+  '',
+  '關於 tasks：',
+  '1. 把明確待辦整理成 tasks。每筆有 task（事項描述）、dueDate、importance、sourceCategory。',
+  '   dueDate 一律用 YYYY-MM-DD 格式；沒有明確日期就留空字串。相對日期（例如「下週三」「月底前」）請依使用者提供的今天日期換算成實際日期。',
+  '   importance（重要性）只能是 high / medium / low，依「任務本身的影響與後果」判斷——攸關考核／法規期限／對他人有重大影響＝high；例行、可有可無、影響很小＝low；其餘＝medium。importance 只看任務本身的份量，不要把「時間急不急」算進去（急迫程度由 App 依截止日另外計算）。',
+  '   sourceCategory＝這件事所屬的主題／情境的簡短詞（例如「部門會議」「評鑑」），沒有就留空字串。',
+  '   tasks 只回傳「這次新內容」中新發現的待辦，不要重複回傳既有內容裡的任務。',
+  '',
+  '關於 categories（筆記本）：',
+  '2. 把非待辦內容整理成「有邏輯層次的階層式標題與條列」。分類的類別（categories 的 title）由你自行決定，不需要問使用者。相近的內容歸到同一類，每一類底下用 subsections（子標題 heading + 條列 bullets）呈現。',
   '3. 你會收到目前既有的分類（現有 categories 的 JSON）。請把新內容「合併」進去：能歸入既有類別就歸入，需要新類別就新增。',
-  '重要：既有條列與子標題的文字請「原封不動保留」，不要改寫或刪除使用者既有的內容，只新增。回傳的 categories 必須是「合併後的完整結果」（包含既有的與新增的）。',
-  '4. tasks 只回傳「這次新內容」中新發現的任務，不要重複回傳既有內容裡的任務。',
-  '5. 每個任務要附上 linkedBullets：把 categories 裡「對應到這個任務的那幾條 bullets 文字」原封不動複製進來（通常就是你為這個任務所建立的那一條或幾條條列）。文字必須和 categories 裡的完全一致——之後任務完成刪除時會用它來一併清掉對應的條列。若某任務沒有對應的具體條列，linkedBullets 給空陣列 []。',
-  '6. 消費／支出類的內容（例如買了東西、花了多少錢、付款、繳費、帳單、含金額的開銷）請「只」整理進 expenses，「不要」放進 categories 或 bullets，也「不要」為它建立「財務紀錄」「花費」之類的分類——這些消費紀錄會呈現在獨立的「記帳」介面，不放在首頁分類。每筆 expense 欄位：item＝品項或用途（簡短，例如「午餐便當」「加油」）；amount＝金額，只放阿拉伯數字（不含貨幣符號、不含逗號，台幣通常是整數）；date＝消費日期 YYYY-MM-DD（內容沒寫日期就用上面提供的今天日期）；category＝你判斷的消費分類，用繁體中文簡短詞（例如 餐飲／交通／購物／娛樂／居家／醫療／教育／其他）。',
-  '7. expenses 只回傳「這次新內容」中的消費紀錄，不要重複既有的；若這次內容完全沒有消費，expenses 給空陣列 []。純粹記錄花費的內容通常不是待辦任務，不必再放進 tasks。',
+  '   重要：既有條列與子標題的文字請「原封不動保留」，不要改寫或刪除使用者既有的內容，只新增。回傳的 categories 必須是「合併後的完整結果」（包含既有的與新增的）。既有分類中若有你判斷屬於待辦的條列，也不要把它搬到 tasks（那是使用者自己整理的，保持原樣）。',
+  '',
+  '關於 expenses（記帳，第三個獨立去處）：',
+  '4. 消費／支出類的內容（例如買了東西、花了多少錢、付款、繳費、帳單、含金額的開銷）請「只」整理進 expenses，「不要」放進 categories 或 tasks，也「不要」為它建立「財務紀錄」「花費」之類的分類——這些消費紀錄會呈現在獨立的「記帳」介面。每筆 expense 欄位：item＝品項或用途（簡短，例如「午餐便當」「加油」）；amount＝金額，只放阿拉伯數字（不含貨幣符號、不含逗號，台幣通常是整數）；date＝消費日期 YYYY-MM-DD（內容沒寫日期就用上面提供的今天日期）；category＝你判斷的消費分類，用繁體中文簡短詞（例如 餐飲／交通／購物／娛樂／居家／醫療／教育／其他）。',
+  '5. expenses 只回傳「這次新內容」中的消費紀錄，不要重複既有的；若這次內容完全沒有消費，expenses 給空陣列 []。',
+  '',
   '全部用繁體中文。只輸出符合 schema 的 JSON。',
 ].join('\n');
 
@@ -1127,18 +1147,16 @@ function appendTasks(tasks) {
       (x) => x.task === t.task && (x.dueDate || '') === (t.dueDate || '')
     );
     if (dup) continue;
-    const linkedItemIds = [];
-    for (const bt of (Array.isArray(t.linkedBullets) ? t.linkedBullets : [])) {
-      const id = findBulletIdByText(bt);
-      if (id && !linkedItemIds.includes(id)) linkedItemIds.push(id);
-    }
+    // New model: a task and a note never overlap, so a task starts with no linked
+    // bullets. linkedItemIds is now used only to bind files the user attaches to
+    // this task card (keyed by the task's own id — see addTaskAttachments).
     state.tasks.push({
       id: 'tk_' + genId(),
       task: t.task,
       dueDate: t.dueDate || '',
       importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
       sourceCategory: t.sourceCategory || '',
-      linkedItemIds,
+      linkedItemIds: [],
       done: false,
     });
   }
@@ -1288,12 +1306,12 @@ async function createAttachment(src, linkedItemIds) {
 async function addTaskAttachments(t, files) {
   setLoading(true);
   try {
-    let targetId = (t.linkedItemIds && t.linkedItemIds[0]) || null;
-    if (!targetId) {
-      targetId = ensureHomeBullet(t.task || '任務附件');
-      if (!Array.isArray(t.linkedItemIds)) t.linkedItemIds = [];
-      t.linkedItemIds.push(targetId);
-    }
+    // Bind the file to the task's OWN id (not a note bullet) so a task stays
+    // self-contained — the two pages never share content. attachmentsForItems /
+    // orphanAttachments both treat a task id as a live owner.
+    const targetId = t.id;
+    if (!Array.isArray(t.linkedItemIds)) t.linkedItemIds = [];
+    if (!t.linkedItemIds.includes(targetId)) t.linkedItemIds.push(targetId);
     let added = 0;
     for (const file of files) {
       if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 10MB，無法附加。`); continue; }
@@ -1425,7 +1443,17 @@ function orphanAttachments() {
   for (const c of state.categories)
     for (const sub of c.subsections || [])
       for (const b of sub.bullets || []) live.add(b.id);
+  for (const t of state.tasks) live.add(t.id); // files attached straight to a task card
   return state.attachments.filter((a) => !(a.linkedItemIds || []).some((id) => live.has(id)));
+}
+
+// Does a note bullet with this id still exist? Used to tell a legacy task's real
+// linked bullets apart from a task's own-id (attachment) links on delete.
+function bulletExists(id) {
+  for (const c of state.categories)
+    for (const sub of c.subsections || [])
+      for (const b of sub.bullets || []) if (b.id === id) return true;
+  return false;
 }
 
 // Remove a file's local blob and (best-effort) its Drive copy.
@@ -1473,13 +1501,22 @@ function removeBulletsByIds(ids) {
 // their attachments). Confirms first since removing notes is irreversible;
 // un-done tasks are deleted alone, leaving their notes (and files) intact.
 function deleteTask(t) {
-  const willClearNotes = t.done && (t.linkedItemIds || []).length > 0;
-  if (willClearNotes) {
-    const attCount = attachmentsForItems(t.linkedItemIds).length;
-    const extra = attCount ? `\n（含 ${attCount} 個附加檔案，也會一併刪除）` : '';
-    if (!confirm(`刪除已完成任務「${t.task}」？\n對應的分項筆記條列也會一併刪除。${extra}`)) return;
-    removeBulletsByIds(t.linkedItemIds);
+  const linked = t.linkedItemIds || [];
+  // Legacy tasks may still point at real note bullets; new tasks only carry their
+  // own id (for attached files). A done task clears everything it owns; an undone
+  // one only clears its own attached files (its legacy notes are left intact).
+  const liveBullets = linked.filter(bulletExists);
+  const idsToClear = t.done ? linked : [t.id];
+  const atts = attachmentsForItems(idsToClear);
+  if (t.done && (liveBullets.length || atts.length)) {
+    let msg = `刪除已完成任務「${t.task}」？`;
+    if (liveBullets.length) msg += `\n對應的 ${liveBullets.length} 條筆記也會一併刪除。`;
+    if (atts.length) msg += `\n含 ${atts.length} 個附加檔案，也會一併刪除。`;
+    if (!confirm(msg)) return;
+  } else if (!t.done && atts.length) {
+    if (!confirm(`刪除任務「${t.task}」？\n含 ${atts.length} 個附加檔案，也會一併刪除。`)) return;
   }
+  removeBulletsByIds(idsToClear); // no-op on non-bullet ids; still purges their files
   state.tasks = state.tasks.filter((x) => x.id !== t.id);
   saveState();
   render();
@@ -1512,6 +1549,7 @@ function render() {
   const expN = state.expenses.length;
   const hasContent = state.categories.length > 0 || state.tasks.length > 0 || orphans.length > 0 || expN > 0;
   els.emptyHint.hidden = hasContent;
+  if (els.tabBar) els.tabBar.hidden = !hasContent;
   if (els.expenseHintBtn) {
     els.expenseHintBtn.hidden = expN === 0;
     els.expenseHintBtn.textContent = `💰 已記帳 ${expN} 筆消費 — 點此看統計與明細`;
@@ -1519,6 +1557,23 @@ function render() {
   renderDrafts();
   renderTasks();
   renderCategories(orphans);
+  applyPageVisibility(hasContent);
+}
+
+// 待辦任務 and 筆記本 are two sub-pages sharing one screen; only the active one
+// shows. Both lists are always built (cheap); this just toggles which is visible.
+function applyPageVisibility(hasContent) {
+  const onTasks = currentPage === 'tasks';
+  els.tasksSection.hidden = !(hasContent && onTasks);
+  els.categoriesSection.hidden = !(hasContent && !onTasks);
+  if (els.tabTasks) els.tabTasks.classList.toggle('active', onTasks);
+  if (els.tabNotes) els.tabNotes.classList.toggle('active', !onTasks);
+}
+
+function setPage(page) {
+  if (page !== 'tasks' && page !== 'notes') return;
+  currentPage = page;
+  render();
 }
 
 /* ---------------- Attachment chip + open/download ---------------- */
@@ -1644,8 +1699,16 @@ function linkifyInto(el, text) {
 function renderTasks() {
   enforceUrgentOverrides(); // drop stale 普通/可暫緩 overrides on now-auto-urgent tasks
   const pending = state.tasks;
-  els.tasksSection.hidden = pending.length === 0;
   els.tasksList.innerHTML = '';
+  // Section visibility is decided by applyPageVisibility (which page is active);
+  // when this page is showing but has no tasks, give it its own empty line.
+  if (pending.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'page-empty';
+    empty.textContent = '目前沒有待辦任務。新增記事後，需要辦理的事項會出現在這裡。';
+    els.tasksList.appendChild(empty);
+    return;
+  }
 
   // Sort: not-done first; then by priority tier (urgent→normal→low); within a
   // tier by combined score desc, then earliest due date.
@@ -1813,6 +1876,15 @@ function renderTasks() {
     cal.textContent = '＋ 加入行事曆';
     metaRow.appendChild(cal);
 
+    // Move this item over to 筆記本 (in case the AI mis-filed it as a task).
+    const toNote = document.createElement('button');
+    toNote.type = 'button';
+    toNote.className = 'cal-btn task-move-btn';
+    toNote.textContent = '🔄 改為筆記';
+    toNote.title = '把這則移到「筆記本」（不是需要辦理的事項時）';
+    toNote.addEventListener('click', (e) => { e.stopPropagation(); convertTaskToNote(t); });
+    metaRow.appendChild(toNote);
+
     // Attach a file straight from the task card (kept as an attachment; text is
     // not extracted). Each card gets its own hidden input.
     const attachBtn = document.createElement('button');
@@ -1881,8 +1953,17 @@ function renderTasks() {
 
 function renderCategories(orphans) {
   orphans = orphans || orphanAttachments();
-  els.categoriesSection.hidden = state.categories.length === 0 && orphans.length === 0;
   els.categoriesList.innerHTML = '';
+  // Section visibility is handled by applyPageVisibility; show an empty line when
+  // the 筆記本 page is active but has nothing yet (the ＋新增分類 button stays in
+  // the section head above, so the user can still create one).
+  if (state.categories.length === 0 && orphans.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'page-empty';
+    empty.textContent = '目前沒有筆記。新增記事後，沒有明確待辦的內容會整理到這裡。';
+    els.categoriesList.appendChild(empty);
+    return;
+  }
 
   state.categories.forEach((cat, ci) => {
     const expanded = expandedCats.has(cat);
@@ -2035,6 +2116,14 @@ function renderCategories(orphans) {
           renderCategories();
         });
 
+        const bMove = document.createElement('button');
+        bMove.className = 'bullet-move';
+        bMove.textContent = '🔄';
+        bMove.title = '改為待辦任務';
+        bMove.setAttribute('aria-label', '改為待辦任務');
+        bMove.hidden = editingBullet;
+        bMove.addEventListener('click', () => convertBulletToTask(cat, sub, bi, b));
+
         const bDel = document.createElement('button');
         bDel.className = 'bullet-del';
         bDel.textContent = '✕';
@@ -2050,6 +2139,7 @@ function renderCategories(orphans) {
         row.appendChild(handle);
         row.appendChild(span);
         row.appendChild(bEdit);
+        row.appendChild(bMove);
         row.appendChild(bDel);
         li.appendChild(row);
 
@@ -2149,6 +2239,75 @@ function addCategory() {
   saveState();
   render();
 }
+// Fixed landing bucket for tasks the user manually re-files as notes.
+function ensureUncategorized() {
+  let cat = state.categories.find((c) => c.title === UNCAT_TITLE);
+  if (!cat) { cat = { title: UNCAT_TITLE, subsections: [] }; state.categories.push(cat); }
+  return cat;
+}
+
+/* ---------------- Manual move between 待辦任務 and 筆記本 ---------------- */
+// The AI keeps the two pages mutually exclusive, but its judgement isn't perfect,
+// so each item carries a 🔄 button to move it to the other page by hand.
+
+// 待辦任務 → 筆記本. A legacy task whose note bullet still exists just drops the
+// task (the note already lives in the notebook); otherwise the task text becomes a
+// new bullet in 未分類, and any files attached to the task follow it.
+function convertTaskToNote(t) {
+  const linked = t.linkedItemIds || [];
+  const existingBullet = linked.find(bulletExists);
+  if (existingBullet) {
+    state.tasks = state.tasks.filter((x) => x.id !== t.id);
+    saveState();
+    render();
+    toast('已改為筆記（原本就有對應筆記）✓');
+    return;
+  }
+  const cat = ensureUncategorized();
+  const sub = getGeneralSub(cat);
+  const newId = genId();
+  sub.bullets.push({ id: newId, text: t.task || '' });
+  // Re-point any files attached to the task (keyed by its own id) onto the bullet.
+  for (const att of state.attachments) {
+    if ((att.linkedItemIds || []).includes(t.id)) {
+      att.linkedItemIds = att.linkedItemIds.map((id) => (id === t.id ? newId : id));
+    }
+  }
+  state.tasks = state.tasks.filter((x) => x.id !== t.id);
+  expandedCats.add(cat);
+  saveState();
+  render();
+  toast('已改為筆記，放到「未分類」（切到「筆記本」分頁可看到）✓');
+}
+
+// 筆記本 → 待辦任務. The bullet text becomes a new task (no due date, medium
+// importance → App computes 緊急程度); its files follow onto the task's own id.
+// The bullet is removed from the notebook, cleaning up an emptied sub/category.
+function convertBulletToTask(cat, sub, bi, b) {
+  const newTaskId = 'tk_' + genId();
+  const task = {
+    id: newTaskId,
+    task: b.text || '',
+    dueDate: '',
+    importance: 'medium',
+    sourceCategory: cat.title && cat.title !== UNCAT_TITLE ? cat.title : '',
+    linkedItemIds: [],
+    done: false,
+  };
+  const atts = attachmentsForBullet(b.id);
+  if (atts.length) {
+    task.linkedItemIds.push(newTaskId);
+    for (const att of atts) att.linkedItemIds = (att.linkedItemIds || []).map((id) => (id === b.id ? newTaskId : id));
+  }
+  state.tasks.push(task);
+  sub.bullets.splice(bi, 1);
+  cleanupEmptySub(cat, sub);
+  if (categoryBulletCount(cat) === 0) state.categories = state.categories.filter((c) => c !== cat);
+  saveState();
+  render();
+  toast('已改為待辦任務（切到「待辦任務」分頁可看到）✓');
+}
+
 function placeCaretEnd(el) {
   const r = document.createRange();
   r.selectNodeContents(el);
@@ -3334,8 +3493,10 @@ if (els.cloudDisconnectBtn) els.cloudDisconnectBtn.addEventListener('click', clo
 /* ---------------- Wire up ---------------- */
 els.processBtn.addEventListener('click', processInput);
 if (els.stashBtn) els.stashBtn.addEventListener('click', stashDraft);
+if (els.tabTasks) els.tabTasks.addEventListener('click', () => setPage('tasks'));
+if (els.tabNotes) els.tabNotes.addEventListener('click', () => setPage('notes'));
 $('addCatBtn').addEventListener('click', addCategory);
-$('emptyAddCatBtn').addEventListener('click', addCategory);
+$('emptyAddCatBtn').addEventListener('click', () => { setPage('notes'); addCategory(); });
 els.clearBtn.addEventListener('click', () => {
   if (!confirm('清空所有分類與任務？此動作無法復原。')) return;
   state = structuredClone(defaultState);

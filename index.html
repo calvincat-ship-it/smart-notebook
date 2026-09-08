@@ -29,26 +29,31 @@
 
 <main>
   <div id="emptyHint" class="empty-hint">
-    <p>還沒有內容。點右上角 <b>✏️ 新增記事</b>，輸入文字或檔案後按「整理」，Claude 會自動分類並找出待辦。</p>
+    <p>還沒有內容。點右上角 <b>✏️ 新增記事</b>，輸入文字或檔案後按「整理」，Claude 會自動分成「待辦任務」與「筆記本」。</p>
     <div class="empty-actions">
       <button id="emptyAddInputBtn" class="primary-btn">✏️ 新增記事</button>
       <button id="emptyAddCatBtn" class="ghost-btn">＋ 自建分類</button>
     </div>
   </div>
 
+  <!-- Two sub-pages, one visible at a time. 待辦任務 is the home page. -->
+  <nav id="tabBar" class="tab-bar" hidden>
+    <button id="tabTasks" class="tab-btn active" type="button">📌 待辦任務</button>
+    <button id="tabNotes" class="tab-btn" type="button">📓 筆記本</button>
+  </nav>
+
   <!-- Bookkeeping banner:消費紀錄不放首頁，收在「記帳」裡；有紀錄時提示入口 -->
   <button id="expenseHintBtn" class="expense-hint" hidden></button>
 
-  <!-- Tasks -->
+  <!-- Tasks (home) -->
   <section id="tasksSection" class="section" hidden>
-    <h2 class="section-title">📌 待辦任務</h2>
     <div id="tasksList"></div>
   </section>
 
-  <!-- Categories -->
+  <!-- Notebook (formerly 分類整理) -->
   <section id="categoriesSection" class="section" hidden>
     <div class="section-head">
-      <h2 class="section-title">🗂 分類整理</h2>
+      <h2 class="section-title">📓 筆記本</h2>
       <div class="head-btns">
         <button id="addCatBtn" class="link-btn">＋ 新增分類</button>
         <button id="clearBtn" class="link-btn">清空</button>
