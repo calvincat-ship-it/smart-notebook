@@ -5,7 +5,12 @@
 ## 最後更新
 - 時間：2026-09-08
 - 機器：Desktop\claude code
-- 版本：**main = v15.01（已 push；GH Pages 依常規部署）**。localStorage schema 未變、向下相容。
+- 版本：**main = v15.02（已 push；GH Pages 依常規部署）**。localStorage schema 未變、向下相容。
+
+## v15.02＝修「手機上超長附件檔名把條列按鈕擠出畫面、無法刪除/編輯」（實機回報）
+- 真因：`.bullet-text` 為 `flex:1` 但**缺 `min-width:0`**，長且無空白的字串（尤其附件自動建立的筆記條列＝檔名）不換行→撐寬整列→把 ✒/🔄/✕ 推出畫面右側；手機無法左右捲→該筆無法刪除/編輯。
+- 修（純 CSS）：`.bullet-text` 加 `min-width:0`＋`overflow-wrap:anywhere`；`.bullet-edit/.bullet-move/.bullet-del` 補 `flex:0 0 auto`（永不被壓縮）；`.task-text` 也補 `overflow-wrap:anywhere`。mobile 375 實測：長檔名換行、三顆鈕與附件 chip 的 ✕ 皆在畫面內、`scrollWidth==375` 無橫向溢出。commit c7c02f9。
+- 備忘：附件 chip 本身早有 `.attach-open{max-width:60vw;ellipsis}`＝chip 端 OK，本次是「條列文字」端的問題。日後任何 flex 列放長字串都記得 `min-width:0`＋`overflow-wrap`。
 
 ## v15.01＝修「雲端附件下載失敗（數字）」（實機回報：已連結雲端、附件有備份，但電腦＋Android 都開不了）
 - 真因：附件一律信任 bundle 內 `driveFileId`、從不重新解析；該 id 過期（還原舊備份／重新連結／更換帳號後）→ 目前帳號 appDataFolder 內該 id 失效 → `alt=media` 回 404/403，每台裝置皆掛。與血壓／課務 App 同類 bug（解法皆「一律以檔名重新解析」）。
@@ -39,6 +44,6 @@
 - 摺疊/編輯/堆疊狀態（expandedCats/expandedTasks/editingCats/editingBullets/lowStackExpanded/doneStackExpanded/**currentPage**）皆 session-only、不持久化、不同步。currentPage 每次開啟一律回 'tasks'（待辦任務為首頁）。
 - **兩頁互斥模型（v15.00）**：新內容 AI 只會放一邊（task 或 note）。任務不再有對應筆記條列；`tasks[].linkedItemIds` 現只裝「從任務卡片直接附加的檔案」的 owner id（＝任務自身 id）。改附件/刪除相關邏輯勿再假設 task 一定有筆記條列。舊資料（含 linkedItemIds 指向真 bullet 的 legacy 任務）仍相容：normalizeState 遷移、deleteTask 用 bulletExists() 區分。
 - 測試踩雷（詳見 memory `feedback_pwa_testing_approach`）：in-app Browser 無 BarcodeDetector；改 CSS 要替 stylesheet 加 query 強制刷新；背景分頁 `.blur()` 不觸發（測提交改 `dispatchEvent(new Event('blur'))`）；screenshot 常因 pane 未顯示無法合成→改 computed style + 傳同 CSS 預覽 HTML。
-- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v15.01**（APP_VERSION 與 sw CACHE_NAME 同步）。
+- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v15.02**（APP_VERSION 與 sw CACHE_NAME 同步）。
 - **附件雲端 id 勿再盲信**：跨裝置/換帳號/還原後 `driveFileId` 會過期；下載一律走 `downloadAttachmentBlobHealing`（以檔名 `att_<id>` 重新解析自癒）。主 JSON 也是以檔名解析（同一原則）。
 - 開工先 sync-start、收工必 sync-end；不要兩台同時改同一個檔。
