@@ -353,7 +353,7 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
 }
 .task-item.done .task-check { background: var(--green); border-color: var(--green); color: #fff; }
 .task-main { flex: 1; min-width: 0; }
-.task-text { font-weight: 500; }
+.task-text { font-weight: 500; overflow-wrap: anywhere; }
 .task-link { color: var(--accent); text-decoration: underline; overflow-wrap: anywhere; }
 .task-link:active { opacity: .7; }
 .task-meta { font-size: .8rem; color: var(--ink-soft); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
@@ -444,14 +444,17 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
   padding: 0 2px;
 }
 .drag-handle:active { cursor: grabbing; color: var(--accent); }
-.bullet-text { flex: 1; padding: 1px 2px; border-radius: 4px; }
+/* min-width:0 lets the flex item shrink below its content; overflow-wrap breaks a
+   long unbroken token (e.g. a long filename or URL) onto the next line instead of
+   forcing the row wider and pushing the ✒/🔄/✕ buttons off-screen on mobile. */
+.bullet-text { flex: 1; min-width: 0; overflow-wrap: anywhere; padding: 1px 2px; border-radius: 4px; }
 .bullet-text:focus { outline: 1px solid var(--accent); background: #fff; }
-.bullet-del { border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; }
+.bullet-del { flex: 0 0 auto; border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; }
 .bullet:hover .bullet-del { color: var(--ink-soft); }
-.bullet-edit { border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; padding: 0 2px; }
+.bullet-edit { flex: 0 0 auto; border: none; background: none; color: var(--line); cursor: pointer; font-size: .9rem; padding: 0 2px; }
 .bullet:hover .bullet-edit { color: var(--ink-soft); }
 .bullet-edit:active { color: var(--accent); }
-.bullet-move { border: none; background: none; cursor: pointer; font-size: .82rem; padding: 0 2px; opacity: .55; }
+.bullet-move { flex: 0 0 auto; border: none; background: none; cursor: pointer; font-size: .82rem; padding: 0 2px; opacity: .55; }
 .bullet:hover .bullet-move { opacity: 1; }
 .bullet-move:active { transform: scale(.9); }
 
