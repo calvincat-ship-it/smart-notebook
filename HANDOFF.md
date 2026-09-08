@@ -5,7 +5,12 @@
 ## 最後更新
 - 時間：2026-09-08
 - 機器：Desktop\claude code
-- 版本：**main = v16.01（已 push；GH Pages 依常規部署）**。新增 `cat.id`、`smart_notebook_cache_v1`（本機快取索引）；attachment 新增 `kind:'link'` 型（url/shared/driveFileId 指向使用者一般 Drive）。**DRIVE_SCOPE 新增 `drive.file`（首次雲端動作會觸發一次 Google 重新授權）**。向下相容。
+- 版本：**main = v16.02（已 push；GH Pages 依常規部署）**。新增 `cat.id`、`smart_notebook_cache_v1`；attachment `kind:'link'` 型；**DRIVE_SCOPE 含 `drive.file`**。向下相容。
+
+## v16.02＝修「大檔上傳沒跳授權就失敗」（實機回報）
+- 真因：已連雲端者手上是**只含 drive.appdata 的舊 access token**；大檔上傳沿用它、從不主動要 drive.file → Google 不跳同意畫面，寫入一般 Drive 被擋（權限不足，非 401 故 driveFetch 不重試）→ 失敗。
+- 修：追蹤 GIS 回傳 granted scope（`grantedScopes`，取自 token 回應 `scope`）；新增 `ensureDriveFileScope()`＝若未含 drive.file 就清權杖、發**互動式** token 請求（prompt=''）觸發同意畫面，拒絕則拋清楚訊息；`addCategoryBigFiles` 在最貼近點擊處（早於分享 confirm/任何 Drive 動作）先呼叫它，確保同意視窗能在使用者手勢內彈出。preview 三案驗證通過。**真機仍待測**（要看實際同意畫面＋上傳成功）。
+- ⚠ 若真機仍不跳：可能是 GIS token 彈窗被手勢逾時擋掉（改在 change handler 更前面呼叫）、或帳號屬管理限制。屆時看 console/error_callback type。
 
 ## v16.01＝大檔混合策略（使用者定案：≤10MB→App 私有雲端；>10MB→App 傳到你自己 Drive 存連結、可選分享）
 - **App 內附件上限降回 10MB**（`MAX_ATTACH_BYTES`）＝走 appDataFolder、自動同步、隨 App 備份。分類 📎 上傳遇 >10MB 擋下並引導改用「☁️ 大檔上傳」。
@@ -62,7 +67,7 @@
 - 摺疊/編輯/堆疊狀態（expandedCats/expandedTasks/editingCats/editingBullets/lowStackExpanded/doneStackExpanded/**currentPage**）皆 session-only、不持久化、不同步。currentPage 每次開啟一律回 'tasks'（待辦任務為首頁）。
 - **兩頁互斥模型（v15.00）**：新內容 AI 只會放一邊（task 或 note）。任務不再有對應筆記條列；`tasks[].linkedItemIds` 現只裝「從任務卡片直接附加的檔案」的 owner id（＝任務自身 id）。改附件/刪除相關邏輯勿再假設 task 一定有筆記條列。舊資料（含 linkedItemIds 指向真 bullet 的 legacy 任務）仍相容：normalizeState 遷移、deleteTask 用 bulletExists() 區分。
 - 測試踩雷（詳見 memory `feedback_pwa_testing_approach`）：in-app Browser 無 BarcodeDetector；改 CSS 要替 stylesheet 加 query 強制刷新；背景分頁 `.blur()` 不觸發（測提交改 `dispatchEvent(new Event('blur'))`）；screenshot 常因 pane 未顯示無法合成→改 computed style + 傳同 CSS 預覽 HTML。
-- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v16.01**（APP_VERSION 與 sw CACHE_NAME 同步）。
+- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v16.02**（APP_VERSION 與 sw CACHE_NAME 同步）。
 - **大檔＝連結型附件（v16.01）**：`kind:'link'` 指向使用者一般 Drive；點擊開 url、不下載/不快取；移除只移連結(除非使用者選擇一併刪 Drive 檔)。改附件邏輯時要一併考慮 link 型（多處已 guard：purge/open/normalize/upload）。`drive.file` scope 已加。
 - **附件儲存新模型（v16.00）**：Drive 為本體、本機是 LRU 快取；改附件相關邏輯時記得「無 driveFileId＝未備份＝不可驅逐」；blob 讀寫走 cache*，草稿 ref blob 走原始 idb*。上傳走 resumable。
 - **附件雲端 id 勿再盲信**：跨裝置/換帳號/還原後 `driveFileId` 會過期；下載一律走 `downloadAttachmentBlobHealing`（以檔名 `att_<id>` 重新解析自癒）。主 JSON 也是以檔名解析（同一原則）。
