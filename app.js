@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v15.00';
+const APP_VERSION = 'v15.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1615,12 +1615,18 @@ function deleteAttachmentById(id) {
 async function openAttachment(att) {
   try {
     let blob = await idbGetBlob(att.id);
-    if (!blob && att.driveFileId) {
-      toast('從雲端下載附件…');
-      blob = await driveDownloadBlob(att.driveFileId);
-      if (blob) await idbPutBlob(att.id, blob);
+    if (!blob) {
+      if (att.driveFileId || cloudState.enabled) {
+        if (!cloudState.enabled) { toast('這台裝置沒有此附件，且未連結雲端。請在原上傳裝置開啟，或連結 Google Drive 同步。'); return; }
+        toast('從雲端下載附件…');
+        blob = await downloadAttachmentBlobHealing(att); // self-heals a stale driveFileId
+        if (!blob) return; // reason already surfaced by the resolver
+        await idbPutBlob(att.id, blob);
+      } else {
+        toast('找不到附件檔案（這台裝置沒有，雲端也沒有備份紀錄）。');
+        return;
+      }
     }
-    if (!blob) { toast('找不到附件檔案（可能尚未同步到這台裝置）。'); return; }
     const typed = att.type ? new Blob([blob], { type: att.type }) : blob;
     const url = URL.createObjectURL(typed);
     const w = window.open(url, '_blank');
@@ -2513,10 +2519,34 @@ async function driveUploadBlob(fileId, name, blob) {
   return res.json();
 }
 
-async function driveDownloadBlob(fileId) {
-  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {});
-  if (!res.ok) throw new Error('下載附件失敗（' + res.status + '）。');
-  return res.blob();
+// Fetch one attachment's binary from Drive, self-healing a stale driveFileId.
+// The stored id can go dead — a bundle restored from an older backup, an account
+// re-connect, or a switch — but the file itself still lives in the current
+// account's appDataFolder under its stable name `att_<id>` (same fix the blood
+// pressure / course apps use for the main JSON: always re-resolve by name).
+// Returns a Blob, or null after toasting a precise reason. Throws only on a
+// network error the caller's try/catch reports.
+async function downloadAttachmentBlobHealing(att) {
+  const wantName = 'att_' + att.id;
+  // 1) Try the id we have. A 404/403 means it may be stale → fall through to
+  //    re-resolve by name; any other bad status is a real download error.
+  if (att.driveFileId) {
+    const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${att.driveFileId}?alt=media`, {});
+    if (res.ok) return res.blob();
+    if (res.status !== 404 && res.status !== 403) { toast('下載附件失敗（' + res.status + '）。'); return null; }
+  }
+  // 2) Re-resolve by the file's stable name in this account's appDataFolder.
+  let found = null;
+  try { found = await driveFindFile(wantName); }
+  catch (e) { toast('讀取雲端附件清單失敗：' + (e.message || e)); return null; }
+  if (!found) {
+    toast('雲端在目前帳號找不到此附件（可能是用另一個 Google 帳號上傳，或檔案已被刪除）。');
+    return null;
+  }
+  if (found.id !== att.driveFileId) { att.driveFileId = found.id; saveStateQuiet(); } // heal the stored id
+  const res2 = await driveFetch(`https://www.googleapis.com/drive/v3/files/${found.id}?alt=media`, {});
+  if (!res2.ok) { toast('下載附件失敗（' + res2.status + '）。'); return null; }
+  return res2.blob();
 }
 
 async function driveDelete(fileId) {
