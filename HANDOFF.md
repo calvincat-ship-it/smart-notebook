@@ -5,7 +5,17 @@
 ## 最後更新
 - 時間：2026-09-08
 - 機器：Desktop\claude code
-- 版本：**main = v16.00（已 push；GH Pages 依常規部署）**。新增 `cat.id`（optional、normalizeState 遷移）；localStorage 另加 `smart_notebook_cache_v1`（本機快取索引，不進雲端）。向下相容。
+- 版本：**main = v16.01（已 push；GH Pages 依常規部署）**。新增 `cat.id`、`smart_notebook_cache_v1`（本機快取索引）；attachment 新增 `kind:'link'` 型（url/shared/driveFileId 指向使用者一般 Drive）。**DRIVE_SCOPE 新增 `drive.file`（首次雲端動作會觸發一次 Google 重新授權）**。向下相容。
+
+## v16.01＝大檔混合策略（使用者定案：≤10MB→App 私有雲端；>10MB→App 傳到你自己 Drive 存連結、可選分享）
+- **App 內附件上限降回 10MB**（`MAX_ATTACH_BYTES`）＝走 appDataFolder、自動同步、隨 App 備份。分類 📎 上傳遇 >10MB 擋下並引導改用「☁️ 大檔上傳」。
+- **新 scope `drive.file`**（只能存取 App 自己建立/開啟的檔）→ 讓 App 把大檔傳進使用者「看得見的」My Drive。**不用 Picker**（本 App 無 GOOGLE_API_KEY，且 PWA Picker referrer 金鑰雷）。
+- **筆記本分類「☁️ 大檔上傳」**（≤100MB `MAX_BIGFILE_BYTES`）：`addCategoryBigFiles`→`ensureUploadFolder`（My Drive 建/找「智慧記事本附件」資料夾、id 存 `cloudState.uploadFolderId`、失效自動重建、失敗退 root）→`driveResumableUpload`（泛化：parents/fields/onProgress；進度顯示於 loading 遮罩 `setLoadingText`）→取 `webViewLink`→**使用者選擇是否分享**（confirm→`driveShareAnyone` 設 anyone-with-link reader，否則私人）→存「連結型附件」`{kind:'link',url,shared,driveFileId,linkedItemIds:[cat.id]}`。**不佔本機快取、不進 appDataFolder。**
+- **連結型附件處理**：`makeAttachChip` 顯示 🔗／🔗🌐(分享)、點擊 `window.open(url)`；`.link-chip` 藍色系。移除時 confirm「一併刪 Drive 檔／只移連結(保留檔案)」；`purgeAttachment` 對 link 一律不刪雲端；`deleteAttachmentById` 特案處理；`normalizeState` 保留 kind/url/shared。`uploadPendingAttachments` 不碰 link（已有 driveFileId、無 blob）。
+- 重構：`driveResumableUpload(name,blob,{parents,fields,onProgress})` 為核心，`driveUploadBlob(fileId,name,blob)` 沿用之走 appDataFolder。新增 `driveFileMeta/driveShareAnyone/driveDeleteFile`。
+- preview 驗證(stub)：scope 含 drive.file；大檔上傳建 link 附件(url/shared/driveFileId·不快取·顯示 link-chip·不 orphan·有建資料夾)、>10MB 小檔路徑擋下並提示、移除連結預設保留 Drive 檔、mobile 375 四鈕＋兩種 chip 不爆版。**真實 Drive 往返/重新授權/實際分享權限未真機測**（preview 無帳號）。
+
+## v16.00＝筆記本分類可上傳附件＋拍照｜附件改「雲端為主＋本機 LRU 快取」｜單檔 100MB＋resumable 上傳（本段的 100MB 上限已於 v16.01 改為：App 內 10MB、大檔走連結 100MB）
 
 ## v16.00＝筆記本分類可上傳附件＋拍照｜附件改「雲端為主＋本機 LRU 快取」｜單檔 100MB＋resumable 上傳（使用者確認：拉 100MB＋改快取制）
 - **筆記本分類上傳/拍照**：每個分類 body 加 `.cat-actions`＝「＋新增項目 / 📎上傳附件 / 📷拍照」。`addCategoryAttachments(cat,files)` 綁 `cat.id`（拍照用 `<input capture=environment>`）。分類取得穩定 `cat.id`：`addCategory/ensureUncategorized/ensureHomeBullet` 建時給、`normalizeState` 遷移、**`mergeCategories` 依標題保留 id**（Claude 不見 id）。`orphanAttachments`＋`categoryIsEmpty`（有附件不算空、避免自動刪分類）＋分類計數顯示 `📎N`。
@@ -13,7 +23,7 @@
 - **設定→雲端區**（僅連線後顯示）：本機快取上限下拉（200MB/500MB/1GB/2GB/4GB/不限，預設 500MB＝`settings.cacheBudgetMB`）、目前快取用量、「🧹 清空本機附件快取」、「☁ Drive 空間」配額（`about.get?fields=storageQuota`；appdata scope 若被擋則靜默不顯示）。
 - **上傳可靠度**：`MAX_ATTACH_BYTES` 10MB→**100MB**（`MAX_ATTACH_MB` 動態文案）；OCR 影像另立 `MAX_OCR_BYTES=10MB`（vision API 限制）。**`driveUploadBlob` 由 multipart 單發改 RESUMABLE 分段**（8MB/chunk、`Content-Range`、308 續傳、401 刷 token、5xx 退避重試；session URI 的 PUT 不帶 Authorization）。`fmtSize` 補 GB 級。
 - preview 驗證（stub）：分類上傳綁 cat.id/顯示/不 orphan、LRU 驅逐(雲端最舊先清·未上傳 pin)、resumable(20MB→8/8/4·308→續·200→取 id)、mobile 375 三鈕不爆版、用量/配額文字。**真實 Drive 大檔往返未真機測**（preview 無帳號）。
-- ⚠ 待辦（使用者已提問，待比較後決定）：**大檔策略二選一**——(1)大檔直接存一般 Google Drive、分類只存「路徑/連結」；(2)維持全部在 App 內上傳（現行 v16.00）。比較見對話；未實作。
+- ✅ 大檔策略已定案並於 **v16.01 實作**（混合制：≤10MB→App 私有雲端；>10MB→App 傳使用者自己 Drive 存連結、可選分享）。
 
 ## v15.02＝修「手機上超長附件檔名把條列按鈕擠出畫面、無法刪除/編輯」（實機回報）
 - 真因：`.bullet-text` 為 `flex:1` 但**缺 `min-width:0`**，長且無空白的字串（尤其附件自動建立的筆記條列＝檔名）不換行→撐寬整列→把 ✒/🔄/✕ 推出畫面右側；手機無法左右捲→該筆無法刪除/編輯。
@@ -52,7 +62,8 @@
 - 摺疊/編輯/堆疊狀態（expandedCats/expandedTasks/editingCats/editingBullets/lowStackExpanded/doneStackExpanded/**currentPage**）皆 session-only、不持久化、不同步。currentPage 每次開啟一律回 'tasks'（待辦任務為首頁）。
 - **兩頁互斥模型（v15.00）**：新內容 AI 只會放一邊（task 或 note）。任務不再有對應筆記條列；`tasks[].linkedItemIds` 現只裝「從任務卡片直接附加的檔案」的 owner id（＝任務自身 id）。改附件/刪除相關邏輯勿再假設 task 一定有筆記條列。舊資料（含 linkedItemIds 指向真 bullet 的 legacy 任務）仍相容：normalizeState 遷移、deleteTask 用 bulletExists() 區分。
 - 測試踩雷（詳見 memory `feedback_pwa_testing_approach`）：in-app Browser 無 BarcodeDetector；改 CSS 要替 stylesheet 加 query 強制刷新；背景分頁 `.blur()` 不觸發（測提交改 `dispatchEvent(new Event('blur'))`）；screenshot 常因 pane 未顯示無法合成→改 computed style + 傳同 CSS 預覽 HTML。
-- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v16.00**（APP_VERSION 與 sw CACHE_NAME 同步）。
+- 版本 vNN.MM：小改/修 bug 直接 bump minor；新功能大改先確認。目前 **v16.01**（APP_VERSION 與 sw CACHE_NAME 同步）。
+- **大檔＝連結型附件（v16.01）**：`kind:'link'` 指向使用者一般 Drive；點擊開 url、不下載/不快取；移除只移連結(除非使用者選擇一併刪 Drive 檔)。改附件邏輯時要一併考慮 link 型（多處已 guard：purge/open/normalize/upload）。`drive.file` scope 已加。
 - **附件儲存新模型（v16.00）**：Drive 為本體、本機是 LRU 快取；改附件相關邏輯時記得「無 driveFileId＝未備份＝不可驅逐」；blob 讀寫走 cache*，草稿 ref blob 走原始 idb*。上傳走 resumable。
 - **附件雲端 id 勿再盲信**：跨裝置/換帳號/還原後 `driveFileId` 會過期；下載一律走 `downloadAttachmentBlobHealing`（以檔名 `att_<id>` 重新解析自癒）。主 JSON 也是以檔名解析（同一原則）。
 - 開工先 sync-start、收工必 sync-end；不要兩台同時改同一個檔。
