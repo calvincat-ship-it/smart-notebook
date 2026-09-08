@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v16.01';
+const APP_VERSION = 'v16.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -189,6 +189,7 @@ async function clearCloudBackedCache() {
 
 // Cloud runtime (in-memory only)
 let gisToken = null;      // access token, never persisted
+let grantedScopes = '';   // space-delimited scopes actually granted by the last token
 let tokenClient = null;   // GIS token client
 let cloudTimer = null;    // debounce handle for auto-backup
 let cloudPollTimer = null; // interval handle for auto pull/push while app is open
@@ -2664,7 +2665,7 @@ async function getAccessToken(promptMode) {
           client_id: GOOGLE_CLIENT_ID,
           scope: DRIVE_SCOPE,
           callback: (resp) => {
-            if (resp && resp.access_token) { gisToken = resp.access_token; settleToken('resolve', gisToken); }
+            if (resp && resp.access_token) { gisToken = resp.access_token; grantedScopes = resp.scope || grantedScopes; settleToken('resolve', gisToken); }
             else settleToken('reject', new Error('未取得 Google 授權。'));
           },
           error_callback: (err) => settleToken('reject', new Error('Google 授權未完成' + (err && err.type ? '（' + err.type + '）' : '') + '。')),
@@ -2686,6 +2687,20 @@ async function driveFetch(url, opts, promptMode) {
     res = await run();
   }
   return res;
+}
+
+// Make sure the current token carries the drive.file scope (needed to write to the
+// user's visible Drive). A user who connected BEFORE drive.file was added holds an
+// appdata-only token and would silently get 403s with no consent prompt — so here
+// we force an INTERACTIVE token request, which is where Google shows the one-time
+// consent screen for the added scope. Must be called from a user gesture.
+async function ensureDriveFileScope() {
+  if (gisToken && grantedScopes.includes('drive.file')) return;
+  gisToken = null;
+  await getAccessToken(''); // interactive → prompts for the not-yet-granted scope
+  if (!grantedScopes.includes('drive.file')) {
+    throw new Error('尚未取得「存取你 Drive 檔案」的授權。請再按一次「☁️ 大檔上傳」，並在 Google 畫面按「允許」。');
+  }
 }
 
 async function fetchUserEmail() {
@@ -2853,11 +2868,14 @@ async function driveDeleteFile(fileId) {
 async function addCategoryBigFiles(cat, files) {
   if (!cloudState.enabled) { toast('請先在設定連結 Google 帳號，才能上傳大檔到雲端硬碟。'); return; }
   if (!cat.id) cat.id = 'cat_' + genId();
-  // Ask about sharing once for the whole batch (the user chooses).
-  let share = false;
   const bigList = files.filter((f) => f.size <= MAX_BIGFILE_BYTES);
   if (!bigList.length) { toast(`檔案超過 ${MAX_BIGFILE_MB}MB，無法上傳。`); return; }
-  share = confirm('上傳後要讓「知道連結的人都能檢視」以便分享嗎？\n\n・按「確定」＝可分享（任何人有連結就能開）\n・按「取消」＝只有你自己能開（日後仍可到 Drive 再分享）');
+  // Get the drive.file authorization FIRST (closest to the user's tap), so the
+  // Google consent screen can appear before we start any Drive work.
+  try { await ensureDriveFileScope(); }
+  catch (e) { toast(e.message || String(e)); return; }
+  // Ask about sharing once for the whole batch (the user chooses).
+  const share = confirm('上傳後要讓「知道連結的人都能檢視」以便分享嗎？\n\n・按「確定」＝可分享（任何人有連結就能開）\n・按「取消」＝只有你自己能開（日後仍可到 Drive 再分享）');
   setLoading(true);
   try {
     const folderId = await ensureUploadFolder();
