@@ -14,18 +14,27 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v15.02';
+const APP_VERSION = 'v16.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata';
 const CLOUD_FILENAME = 'notebook-backup.json';
 
-// Attachments: any file type, capped at 10MB each. The binary lives locally in
+// Attachments: any file type, capped at 100MB each. The binary lives locally in
 // IndexedDB and, when cloud sync is on, as its own file in the Drive
 // appDataFolder (so the frequently-synced JSON bundle stays small). The bundle
 // only carries lightweight metadata (id/name/type/size/driveFileId/link).
-const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+// Plain attachments (📎 附加、筆記本分類上傳、拍照、任務卡片附加) — capped at
+// 100MB each and uploaded to Drive with a resilient resumable upload. The binary
+// no longer lives permanently on every device: Drive is the source of truth and
+// the local IndexedDB copy is a bounded LRU cache (see cache* below), so a large
+// total (~GBs) doesn't fill up a phone.
+const MAX_ATTACH_BYTES = 100 * 1024 * 1024;
+const MAX_ATTACH_MB = Math.round(MAX_ATTACH_BYTES / 1024 / 1024);
+// OCR images are sent to Claude's vision API, which rejects very large images, so
+// they keep a smaller, separate cap regardless of the attachment cap.
+const MAX_OCR_BYTES = 10 * 1024 * 1024;
 
 // Every note bullet gets a stable id (編號). Tasks and attachments reference the
 // same id, so a note item, its task, and its file always correspond — and stay
@@ -95,6 +104,80 @@ const idbGetBlob = (id) => idbTx('readonly', (s) => s.get(id));
 const idbDelBlob = (id) => idbTx('readwrite', (s) => s.delete(id));
 const idbClearBlobs = () => idbTx('readwrite', (s) => s.clear());
 
+/* ---------------- Local attachment cache (LRU, bounded) ----------------
+   Attachment binaries live in Drive; the IndexedDB copy is a cache so the same
+   file need not be re-downloaded every open. It is bounded by a budget and
+   evicts least-recently-used entries — but ONLY ones already safe in the cloud
+   (a blob with no driveFileId yet is pinned so an unsynced file is never lost).
+   Draft/staged file blobs are keyed by their own ref and are NOT tracked here,
+   so they're never evicted. Access times + sizes live in a small localStorage
+   map (a few hundred entries at most). */
+const CACHE_META_KEY = 'smart_notebook_cache_v1';
+const CACHE_BUDGET_CHOICES = { '200': 200, '500': 500, '1024': 1024, '2048': 2048, '4096': 4096, 'never': 0 };
+let cacheMeta = loadCacheMeta(); // { [attId]: { size, at } }
+function loadCacheMeta() {
+  try { const o = JSON.parse(localStorage.getItem(CACHE_META_KEY) || '{}'); return (o && typeof o === 'object') ? o : {}; }
+  catch (e) { return {}; }
+}
+function saveCacheMeta() {
+  try { localStorage.setItem(CACHE_META_KEY, JSON.stringify(cacheMeta)); } catch (e) { /* quota — harmless */ }
+}
+function cacheBudgetBytes() {
+  const mb = CACHE_BUDGET_CHOICES[settings.cacheBudgetMB] ?? 500;
+  return mb > 0 ? mb * 1024 * 1024 : Infinity; // 'never' → unbounded (keep everything)
+}
+function cachedTotalBytes() {
+  let n = 0;
+  for (const k in cacheMeta) n += (cacheMeta[k] && cacheMeta[k].size) || 0;
+  return n;
+}
+// Store an attachment blob locally + record it in the cache index, then trim.
+async function cachePut(attId, blob) {
+  await idbPutBlob(attId, blob);
+  cacheMeta[attId] = { size: (blob && blob.size) || 0, at: Date.now() };
+  saveCacheMeta();
+  await enforceCacheBudget(attId);
+}
+// Read a cached attachment blob (and bump its recency).
+async function cacheGet(attId) {
+  const blob = await idbGetBlob(attId);
+  if (blob) { cacheMeta[attId] = { size: blob.size, at: Date.now() }; saveCacheMeta(); }
+  return blob;
+}
+async function cacheDelete(attId) {
+  await idbDelBlob(attId).catch(() => {});
+  if (cacheMeta[attId]) { delete cacheMeta[attId]; saveCacheMeta(); }
+}
+// Evict LRU cached blobs until under budget. Only evicts blobs that are safely in
+// the cloud (attachment has a driveFileId) and never the one just touched.
+async function enforceCacheBudget(keepId) {
+  const budget = cacheBudgetBytes();
+  if (!isFinite(budget)) return;
+  let total = cachedTotalBytes();
+  if (total <= budget) return;
+  const safe = new Map(); // attId → driveFileId presence
+  for (const a of state.attachments) safe.set(a.id, !!a.driveFileId);
+  const entries = Object.keys(cacheMeta)
+    .filter((id) => id !== keepId && safe.get(id)) // pin unsynced + just-used
+    .map((id) => ({ id, at: cacheMeta[id].at || 0, size: cacheMeta[id].size || 0 }))
+    .sort((a, b) => a.at - b.at); // oldest first
+  for (const e of entries) {
+    if (total <= budget) break;
+    await cacheDelete(e.id);
+    total -= e.size;
+  }
+}
+// Drop every cached blob that is safely in the cloud (a manual "free up space").
+// Unsynced blobs (no driveFileId) are kept so nothing unsaved is lost.
+async function clearCloudBackedCache() {
+  const safe = new Set(state.attachments.filter((a) => a.driveFileId).map((a) => a.id));
+  let freed = 0;
+  for (const id of Object.keys(cacheMeta)) {
+    if (safe.has(id)) { freed += cacheMeta[id].size || 0; await cacheDelete(id); }
+  }
+  return freed;
+}
+
 // Cloud runtime (in-memory only)
 let gisToken = null;      // access token, never persisted
 let tokenClient = null;   // GIS token client
@@ -130,6 +213,7 @@ function normalizeState(s) {
   const textToIds = new Map(); // bullet text → queue of ids (for task migration)
   const cats = Array.isArray(s.categories) ? s.categories : [];
   for (const c of cats) {
+    if (!c.id) c.id = 'cat_' + genId(); // stable id so files can be attached to a category
     c.subsections = Array.isArray(c.subsections) ? c.subsections : [];
     for (const sub of c.subsections) {
       sub.bullets = (Array.isArray(sub.bullets) ? sub.bullets : []).map((b) => {
@@ -232,6 +316,7 @@ function loadSettings() {
     autoDeleteDays: s.autoDeleteDays || 'never', // 'never' | '1' | '3' | '7' | '14' | '30'
     workerUrl: s.workerUrl || '',   // optional Cloudflare Worker relay endpoint
     accessCode: s.accessCode || '', // shared access code the relay checks
+    cacheBudgetMB: s.cacheBudgetMB || '500', // local attachment-cache cap: '200'|'500'|'1024'|'2048'|'4096'|'never'
   };
 }
 function saveSettings() {
@@ -360,6 +445,10 @@ const els = {
   cloudRestoreBtn: $('cloudRestoreBtn'),
   cloudSwitchBtn: $('cloudSwitchBtn'),
   cloudDisconnectBtn: $('cloudDisconnectBtn'),
+  driveQuota: $('driveQuota'),
+  cacheBudgetSelect: $('cacheBudgetSelect'),
+  cacheUsage: $('cacheUsage'),
+  cacheClearBtn: $('cacheClearBtn'),
   loadingOverlay: $('loadingOverlay'),
   loadingText: $('loadingText'),
   toast: $('toast'),
@@ -391,10 +480,11 @@ async function extractPdfText(file) {
 }
 
 function fmtSize(bytes) {
-  if (!bytes) return '';
+  if (!bytes) return '0 B';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
 function fileIcon(type, name) {
   const t = (type || '').toLowerCase();
@@ -412,7 +502,7 @@ function fileIcon(type, name) {
 if (els.attachInput) els.attachInput.addEventListener('change', (e) => {
   for (const file of e.target.files) {
     if (file.size > MAX_ATTACH_BYTES) {
-      toast(`「${file.name}」超過 10MB，無法附加。`);
+      toast(`「${file.name}」超過 ${MAX_ATTACH_MB}MB，無法附加。`);
       continue;
     }
     pendingFiles.push({
@@ -453,7 +543,7 @@ if (els.ocrInput) els.ocrInput.addEventListener('change', (e) => {
   for (const file of e.target.files) {
     const mt = (file.type || '').toLowerCase();
     if (!OCR_MEDIA_TYPES.includes(mt)) { toast(`「${file.name}」不是支援的圖片格式（請用 JPG／PNG／GIF／WebP）。`); continue; }
-    if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 10MB，無法辨識。`); continue; }
+    if (file.size > MAX_OCR_BYTES) { toast(`「${file.name}」超過 10MB，無法辨識。`); continue; }
     ocrImages.push({ ref: 'o' + genId(), name: file.name, type: mt, size: file.size, blob: file });
   }
   els.ocrInput.value = '';
@@ -1127,7 +1217,13 @@ function mergeCategories(returned) {
       }
     }
   }
+  // Keep each category's stable id across a re-merge (matched by title) so files
+  // attached to a category survive Claude reorganizing the notes; a brand-new
+  // category gets a fresh id.
+  const idByTitle = new Map();
+  for (const c of state.categories) if (c.id && !idByTitle.has(c.title)) idByTitle.set(c.title, c.id);
   return (Array.isArray(returned) ? returned : []).map((c) => ({
+    id: idByTitle.get(c.title || '未命名分類') || ('cat_' + genId()),
     title: c.title || '未命名分類',
     subsections: (Array.isArray(c.subsections) ? c.subsections : []).map((s) => ({
       heading: s.heading || '',
@@ -1239,7 +1335,7 @@ function buildAttachmentLinkMap(attachmentLinks, preTexts, batch) {
 // input that merged without producing a new bullet). Lives in a 📎 附件 category.
 function ensureHomeBullet(name) {
   let cat = state.categories.find((c) => c.title === '📎 附件');
-  if (!cat) { cat = { title: '📎 附件', subsections: [] }; state.categories.push(cat); }
+  if (!cat) { cat = { id: 'cat_' + genId(), title: '📎 附件', subsections: [] }; state.categories.push(cat); }
   const sub = getGeneralSub(cat);
   const bullet = { id: genId(), text: name };
   sub.bullets.push(bullet);
@@ -1285,7 +1381,7 @@ async function saveBatchAttachments(batch, linkMap) {
 async function createAttachment(src, linkedItemIds) {
   const id = genId();
   const blob = src.blob;
-  await idbPutBlob(id, blob);
+  await cachePut(id, blob); // local cache; the cloud copy is uploaded on next backup
   const att = {
     id,
     name: src.name || '附件',
@@ -1314,7 +1410,7 @@ async function addTaskAttachments(t, files) {
     if (!t.linkedItemIds.includes(targetId)) t.linkedItemIds.push(targetId);
     let added = 0;
     for (const file of files) {
-      if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 10MB，無法附加。`); continue; }
+      if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 ${MAX_ATTACH_MB}MB，無法附加。`); continue; }
       await createAttachment({ blob: file, name: file.name, type: file.type || '', size: file.size }, [targetId]);
       added++;
     }
@@ -1325,6 +1421,34 @@ async function addTaskAttachments(t, files) {
     }
   } catch (err) {
     toast('附加失敗：' + err.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+// Add file(s) straight into a notebook category (📎 上傳附件 / 📷 拍照). The files
+// bind to the category's own id, so they show under that category. Uploaded to
+// Drive on the next (debounced) backup, like every other attachment.
+async function addCategoryAttachments(cat, files) {
+  if (!cat.id) cat.id = 'cat_' + genId();
+  setLoading(true);
+  try {
+    let added = 0, skipped = 0;
+    for (const file of files) {
+      if (file.size > MAX_ATTACH_BYTES) { toast(`「${file.name}」超過 ${MAX_ATTACH_MB}MB，無法上傳。`); skipped++; continue; }
+      await createAttachment({ blob: file, name: file.name, type: file.type || '', size: file.size }, [cat.id]);
+      added++;
+    }
+    if (added) {
+      expandedCats.add(cat); // keep the category open so the new file is visible
+      saveState();
+      render();
+      toast(added > 1 ? `已上傳 ${added} 個附件 ✓` : '已上傳附件 ✓');
+    } else if (!skipped) {
+      toast('沒有選擇檔案。');
+    }
+  } catch (err) {
+    toast('上傳失敗：' + err.message);
   } finally {
     setLoading(false);
   }
@@ -1444,6 +1568,7 @@ function orphanAttachments() {
     for (const sub of c.subsections || [])
       for (const b of sub.bullets || []) live.add(b.id);
   for (const t of state.tasks) live.add(t.id); // files attached straight to a task card
+  for (const c of state.categories) if (c.id) live.add(c.id); // files uploaded to a category
   return state.attachments.filter((a) => !(a.linkedItemIds || []).some((id) => live.has(id)));
 }
 
@@ -1458,7 +1583,7 @@ function bulletExists(id) {
 
 // Remove a file's local blob and (best-effort) its Drive copy.
 function purgeAttachment(att) {
-  idbDelBlob(att.id).catch(() => {});
+  cacheDelete(att.id).catch(() => {});
   if (att.driveFileId && cloudState.enabled) driveDelete(att.driveFileId).catch(() => {});
 }
 
@@ -1467,6 +1592,12 @@ function purgeAttachment(att) {
 // delete, completed-task delete). Callers saveState()+render() afterwards.
 function categoryBulletCount(cat) {
   return (cat.subsections || []).reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
+}
+// A category is empty only if it has no bullets AND no files uploaded to it — so
+// auto-removal (last bullet gone) won't delete a category that still holds files.
+function categoryIsEmpty(cat) {
+  if (categoryBulletCount(cat) > 0) return false;
+  return !(cat.id && attachmentsForItems([cat.id]).length);
 }
 
 function removeBulletsByIds(ids) {
@@ -1486,7 +1617,7 @@ function removeBulletsByIds(ids) {
   // category the user made to drag into is left untouched. Claude re-creates the
   // category by title (mergeCategories) if it later organizes content back in.
   if (affected.size) {
-    state.categories = state.categories.filter((c) => !(affected.has(c) && categoryBulletCount(c) === 0));
+    state.categories = state.categories.filter((c) => !(affected.has(c) && categoryIsEmpty(c)));
   }
   const survivors = [];
   for (const att of state.attachments) {
@@ -1614,14 +1745,14 @@ function deleteAttachmentById(id) {
 // (e.g. it was added on another device), fetch it from Drive on demand.
 async function openAttachment(att) {
   try {
-    let blob = await idbGetBlob(att.id);
+    let blob = await cacheGet(att.id);
     if (!blob) {
       if (att.driveFileId || cloudState.enabled) {
         if (!cloudState.enabled) { toast('這台裝置沒有此附件，且未連結雲端。請在原上傳裝置開啟，或連結 Google Drive 同步。'); return; }
         toast('從雲端下載附件…');
         blob = await downloadAttachmentBlobHealing(att); // self-heals a stale driveFileId
         if (!blob) return; // reason already surfaced by the resolver
-        await idbPutBlob(att.id, blob);
+        await cachePut(att.id, blob); // cache locally for next time (LRU-bounded)
       } else {
         toast('找不到附件檔案（這台裝置沒有，雲端也沒有備份紀錄）。');
         return;
@@ -1897,7 +2028,7 @@ function renderTasks() {
     attachBtn.type = 'button';
     attachBtn.className = 'cal-btn task-attach-btn';
     attachBtn.textContent = '📎 附加檔案';
-    attachBtn.title = '任何格式、單檔上限 10MB，原樣保留（Claude 不讀內容）。點 ℹ️ 看完整說明。';
+    attachBtn.title = '任何格式、單檔上限 100MB，原樣保留（Claude 不讀內容）。點 ℹ️ 看完整說明。';
     const attachHelp = document.createElement('button');
     attachHelp.type = 'button';
     attachHelp.className = 'cal-btn task-attach-help';
@@ -1979,6 +2110,7 @@ function renderCategories(orphans) {
 
     const subs = cat.subsections || [];
     const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
+    const catAttCount = cat.id ? attachmentsForItems([cat.id]).length : 0;
 
     const editing = editingCats.has(cat);
     const head = document.createElement('div');
@@ -2010,7 +2142,9 @@ function renderCategories(orphans) {
 
     const count = document.createElement('span');
     count.className = 'cat-count';
-    count.textContent = totalBullets ? `${totalBullets} 項` : '空';
+    count.textContent = (totalBullets || catAttCount)
+      ? [totalBullets ? `${totalBullets} 項` : '', catAttCount ? `📎${catAttCount}` : ''].filter(Boolean).join(' ')
+      : '空';
 
     const editBtn = document.createElement('button');
     editBtn.className = 'cat-edit';
@@ -2054,10 +2188,10 @@ function renderCategories(orphans) {
     const bodyEl = document.createElement('div');
     bodyEl.className = 'category-body';
     bodyEl.hidden = !expanded;
-    if (totalBullets === 0) {
+    if (totalBullets === 0 && catAttCount === 0) {
       const hint = document.createElement('div');
       hint.className = 'cat-empty-hint';
-      hint.textContent = '把其他分類的項目拖曳到這裡，或按下方「＋ 新增項目」。';
+      hint.textContent = '把其他分類的項目拖曳到這裡，或用下方「＋ 新增項目 / 📎 上傳附件 / 📷 拍照」。';
       bodyEl.appendChild(hint);
     }
 
@@ -2170,11 +2304,52 @@ function renderCategories(orphans) {
       bodyEl.appendChild(subEl);
     });
 
+    // Files uploaded to the category itself (not tied to any one note item).
+    const catAtts = cat.id ? attachmentsForItems([cat.id]) : [];
+    if (catAtts.length) {
+      const attRow = document.createElement('div');
+      attRow.className = 'attach-row cat-attach';
+      for (const a of catAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+      bodyEl.appendChild(attRow);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'cat-actions';
     const addItemBtn = document.createElement('button');
     addItemBtn.className = 'add-item-btn';
     addItemBtn.textContent = '＋ 新增項目';
     addItemBtn.addEventListener('click', () => addItem(cat));
-    bodyEl.appendChild(addItemBtn);
+    actions.appendChild(addItemBtn);
+
+    // 📎 上傳附件 — any file (incl. large ones up to the cap). 📷 拍照 opens the
+    // camera on mobile via the capture attribute (a normal file picker on desktop).
+    const upBtn = document.createElement('button');
+    upBtn.className = 'add-item-btn cat-upload-btn';
+    upBtn.textContent = '📎 上傳附件';
+    const upInput = document.createElement('input');
+    upInput.type = 'file'; upInput.multiple = true; upInput.hidden = true;
+    upBtn.addEventListener('click', () => upInput.click());
+    upInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []); upInput.value = '';
+      if (files.length) await addCategoryAttachments(cat, files);
+    });
+
+    const camBtn = document.createElement('button');
+    camBtn.className = 'add-item-btn cat-upload-btn';
+    camBtn.textContent = '📷 拍照';
+    const camInput = document.createElement('input');
+    camInput.type = 'file'; camInput.accept = 'image/*'; camInput.capture = 'environment'; camInput.hidden = true;
+    camBtn.addEventListener('click', () => camInput.click());
+    camInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []); camInput.value = '';
+      if (files.length) await addCategoryAttachments(cat, files);
+    });
+
+    actions.appendChild(upBtn);
+    actions.appendChild(camBtn);
+    actions.appendChild(upInput);
+    actions.appendChild(camInput);
+    bodyEl.appendChild(actions);
 
     card.appendChild(head);
     card.appendChild(bodyEl);
@@ -2237,7 +2412,7 @@ function addItem(cat) {
   renderCategories();
 }
 function addCategory() {
-  const cat = { title: '新分類', subsections: [] };
+  const cat = { id: 'cat_' + genId(), title: '新分類', subsections: [] };
   state.categories.push(cat);
   expandedCats.add(cat);  // open it so the user can add items right away
   editingCats.add(cat);   // and start in name-edit mode (focused via pendingEditCat)
@@ -2248,7 +2423,7 @@ function addCategory() {
 // Fixed landing bucket for tasks the user manually re-files as notes.
 function ensureUncategorized() {
   let cat = state.categories.find((c) => c.title === UNCAT_TITLE);
-  if (!cat) { cat = { title: UNCAT_TITLE, subsections: [] }; state.categories.push(cat); }
+  if (!cat) { cat = { id: 'cat_' + genId(), title: UNCAT_TITLE, subsections: [] }; state.categories.push(cat); }
   return cat;
 }
 
@@ -2370,7 +2545,7 @@ function moveBullet(src, targetCat) {
   cleanupEmptySub(src.cat, src.sub);
   // If dragging the last bullet out emptied the source category, remove it (same
   // rule as deleting the last bullet). The target still holds the moved bullet.
-  if (src.cat !== targetCat && categoryBulletCount(src.cat) === 0) {
+  if (src.cat !== targetCat && categoryIsEmpty(src.cat)) {
     state.categories = state.categories.filter((c) => c !== src.cat);
   }
   saveState();
@@ -2499,24 +2674,60 @@ async function driveUpload(fileId, name, obj) {
 
 // Attachment binaries — each its own appDataFolder file. Binary is preserved by
 // building the multipart body as a Blob (text parts + the raw file Blob).
+// Upload an attachment binary with Drive's RESUMABLE protocol. A single
+// multipart POST is fragile for large files (a dropped mobile connection loses
+// the whole thing); resumable sends the file in chunks over a session URI and
+// retries a failed chunk from the server-reported offset. Handles files up to
+// 100MB reliably. Returns { id }.
 async function driveUploadBlob(fileId, name, blob) {
-  const metadata = fileId ? { name } : { name, parents: ['appDataFolder'] };
-  const boundary = 'snbf' + Math.random().toString(36).slice(2);
-  const pre =
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
-    JSON.stringify(metadata) +
-    `\r\n--${boundary}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`;
-  const post = `\r\n--${boundary}--`;
-  const url = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id`
-    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`;
-  const res = await driveFetch(url, {
+  const meta = fileId ? { name } : { name, parents: ['appDataFolder'] };
+  const startUrl = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable&fields=id`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id`;
+  const start = await driveFetch(startUrl, {
     method: fileId ? 'PATCH' : 'POST',
-    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body: new Blob([pre, blob, post]),
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': blob.type || 'application/octet-stream',
+      'X-Upload-Content-Length': String(blob.size),
+    },
+    body: JSON.stringify(meta),
   });
-  if (!res.ok) throw new Error('上傳附件失敗（' + res.status + '）。');
-  return res.json();
+  if (!start.ok) throw new Error('建立上傳工作階段失敗（' + start.status + '）。');
+  const session = start.headers.get('Location');
+  if (!session) throw new Error('未取得上傳工作階段位址。');
+
+  const CHUNK = 8 * 1024 * 1024;         // 8MB (a multiple of 256KB, as Drive requires)
+  const total = blob.size;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // A zero-length file still needs one PUT to finalize the session.
+  let offset = 0;
+  while (offset < total || total === 0) {
+    const end = Math.min(offset + CHUNK, total);
+    const chunk = blob.slice(offset, end);
+    const range = total === 0 ? `bytes */0` : `bytes ${offset}-${end - 1}/${total}`;
+    let done = false;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let res;
+      // The session URI is pre-authorized, so no Authorization header here.
+      try { res = await fetch(session, { method: 'PUT', headers: { 'Content-Range': range }, body: chunk }); }
+      catch (e) { await sleep(600 * (attempt + 1)); continue; } // network blip → retry same chunk
+      if (res.status === 200 || res.status === 201) { return res.json(); } // finished
+      if (res.status === 308) {                                            // chunk accepted, more to go
+        const r = res.headers.get('Range');
+        const m = r && /-(\d+)$/.exec(r);
+        offset = m ? (parseInt(m[1], 10) + 1) : end;
+        done = true;
+        break;
+      }
+      if (res.status === 401) { gisToken = null; await getAccessToken('none'); await sleep(300); continue; }
+      if (res.status >= 500) { await sleep(600 * (attempt + 1)); continue; } // transient server error
+      throw new Error('上傳附件失敗（' + res.status + '）。');
+    }
+    if (!done) throw new Error('上傳附件中斷，請稍後再試（網路不穩）。');
+    if (total === 0) break;
+  }
+  throw new Error('上傳完成但未取得檔案編號。');
 }
 
 // Fetch one attachment's binary from Drive, self-healing a stale driveFileId.
@@ -2560,7 +2771,7 @@ async function driveDelete(fileId) {
 // there's no local blob (e.g. metadata that arrived from another device).
 async function uploadAttachmentBlob(att) {
   if (!cloudState.enabled || att.driveFileId) return false;
-  const blob = await idbGetBlob(att.id);
+  const blob = await cacheGet(att.id);
   if (!blob) return false;
   const saved = await driveUploadBlob('', 'att_' + att.id, blob);
   att.driveFileId = saved.id;
@@ -2731,6 +2942,7 @@ function cloudDisconnect() {
 async function clearAllLocalData() {
   state = structuredClone(defaultState);
   try { await idbClearBlobs(); } catch (e) { /* ignore */ }
+  cacheMeta = {}; saveCacheMeta(); // the cache index must not outlive its blobs
   saveStateQuiet();
 }
 
@@ -2940,7 +3152,42 @@ function updateCloudUI() {
     else s = '已連結，自動同步已開啟。';
     if (cloudState.email) s += `\n帳號：${cloudState.email}`;
     els.cloudStatus.textContent = s;
+    refreshCacheUsage();
+    refreshDriveQuota(); // async; fills in when it returns
   }
+}
+
+// Show how much local space the attachment cache is using vs its budget.
+function refreshCacheUsage() {
+  if (!els.cacheUsage) return;
+  const used = cachedTotalBytes();
+  const budget = cacheBudgetBytes();
+  const cap = isFinite(budget) ? `／上限 ${fmtSize(budget)}` : '（不限制）';
+  const n = Object.keys(cacheMeta).length;
+  els.cacheUsage.textContent = ` 目前本機快取：${fmtSize(used)}${cap}，共 ${n} 個檔案。`;
+}
+
+// Read the connected account's Drive storage quota so the user can judge whether
+// a large total (e.g. 10GB of attachments) will fit. Best-effort + cached briefly.
+let _quotaAt = 0, _quotaText = '';
+async function refreshDriveQuota() {
+  if (!els.driveQuota || !cloudState.enabled) return;
+  if (_quotaText && Date.now() - _quotaAt < 60000) { els.driveQuota.textContent = _quotaText; return; }
+  try {
+    const res = await driveFetch('https://www.googleapis.com/drive/v3/about?fields=storageQuota', {});
+    if (!res.ok) return;
+    const q = (await res.json()).storageQuota || {};
+    const used = Number(q.usage || 0);
+    if (q.limit) {
+      const limit = Number(q.limit);
+      const free = Math.max(0, limit - used);
+      _quotaText = `☁ Drive 空間：已用 ${fmtSize(used)}／共 ${fmtSize(limit)}，剩 ${fmtSize(free)}。`;
+    } else {
+      _quotaText = `☁ Drive 空間：已用 ${fmtSize(used)}（此帳號未回報總量上限）。`;
+    }
+    _quotaAt = Date.now();
+    els.driveQuota.textContent = _quotaText;
+  } catch (e) { /* best-effort */ }
 }
 
 /* ---------------- 記帳 (bookkeeping) ---------------- */
@@ -3446,6 +3693,7 @@ function openSettings() {
   els.accessCodeInput.value = settings.accessCode || '';
   els.modelSelect.value = settings.model || 'claude-opus-4-8';
   els.autoDeleteSelect.value = settings.autoDeleteDays || 'never';
+  if (els.cacheBudgetSelect) els.cacheBudgetSelect.value = settings.cacheBudgetMB || '500';
   // Credential group: collapsed by default (keeps the sensitive fields tucked
   // away); auto-expanded only when nothing is configured yet, so first-time
   // setup is visible.
@@ -3506,8 +3754,10 @@ els.saveSettingsBtn.addEventListener('click', () => {
   settings.accessCode = newAccessCode;
   settings.model = els.modelSelect.value;
   settings.autoDeleteDays = els.autoDeleteSelect.value;
+  if (els.cacheBudgetSelect) settings.cacheBudgetMB = els.cacheBudgetSelect.value;
   saveSettings();
   closeSettings();
+  enforceCacheBudget().catch(() => {}); // apply a newly-lowered cache cap right away
   pruneCompletedTasks();
   render();
   toast('設定已儲存');
@@ -3519,6 +3769,14 @@ if (els.cloudBackupBtn) els.cloudBackupBtn.addEventListener('click', () => cloud
 if (els.cloudRestoreBtn) els.cloudRestoreBtn.addEventListener('click', cloudRestore);
 if (els.cloudSwitchBtn) els.cloudSwitchBtn.addEventListener('click', cloudSwitchAccount);
 if (els.cloudDisconnectBtn) els.cloudDisconnectBtn.addEventListener('click', cloudDisconnect);
+if (els.cacheClearBtn) els.cacheClearBtn.addEventListener('click', async () => {
+  const pending = state.attachments.filter((a) => !a.driveFileId && cacheMeta[a.id]).length;
+  const extra = pending ? `\n（有 ${pending} 個附件尚未上傳雲端，會保留、不清除。）` : '';
+  if (!confirm(`清空本機的附件快取？\n只清「已在雲端」的本機副本，需要時會自動重新下載。${extra}`)) return;
+  const freed = await clearCloudBackedCache();
+  refreshCacheUsage();
+  toast(freed ? `已清出 ${fmtSize(freed)} 本機空間 ✓` : '沒有可清除的快取。');
+});
 
 /* ---------------- Wire up ---------------- */
 els.processBtn.addEventListener('click', processInput);
@@ -3527,9 +3785,16 @@ if (els.tabTasks) els.tabTasks.addEventListener('click', () => setPage('tasks'))
 if (els.tabNotes) els.tabNotes.addEventListener('click', () => setPage('notes'));
 $('addCatBtn').addEventListener('click', addCategory);
 $('emptyAddCatBtn').addEventListener('click', () => { setPage('notes'); addCategory(); });
-els.clearBtn.addEventListener('click', () => {
-  if (!confirm('清空所有分類與任務？此動作無法復原。')) return;
+els.clearBtn.addEventListener('click', async () => {
+  if (!confirm('清空所有筆記與任務？此動作無法復原。')) return;
+  // Best-effort: also drop the Drive copies of every attachment so cleared files
+  // don't linger in the cloud, then wipe local blobs + the cache index.
+  if (cloudState.enabled) {
+    for (const a of state.attachments) if (a.driveFileId) driveDelete(a.driveFileId).catch(() => {});
+  }
   state = structuredClone(defaultState);
+  try { await idbClearBlobs(); } catch (e) { /* ignore */ }
+  cacheMeta = {}; saveCacheMeta();
   saveState();
   render();
 });

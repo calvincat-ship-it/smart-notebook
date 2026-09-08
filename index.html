@@ -213,6 +213,21 @@
               <button id="cloudDisconnectBtn" class="ghost-btn">解除連結</button>
             </div>
             <p class="field-note">「更換帳號」會解除目前帳號、清除本機資料，再登入你選擇的新帳號並從新帳號雲端還原（新帳號若無備份則保持空白）。目前帳號的雲端備份會保留、不受影響。</p>
+
+            <div class="cloud-storage">
+              <p class="cloud-status" id="driveQuota"></p>
+              <label class="field-label" for="cacheBudgetSelect">本機附件快取上限</label>
+              <select id="cacheBudgetSelect">
+                <option value="200">200 MB</option>
+                <option value="500">500 MB</option>
+                <option value="1024">1 GB</option>
+                <option value="2048">2 GB</option>
+                <option value="4096">4 GB</option>
+                <option value="never">不限制（全部留在本機）</option>
+              </select>
+              <p class="field-note">附件本體存在雲端；本機只保留最近用過的當「快取」，超過上限會自動清掉最舊的（雲端仍在，下次開啟自動再下載）。<span id="cacheUsage"></span></p>
+              <button id="cacheClearBtn" class="ghost-btn" type="button">🧹 清空本機附件快取</button>
+            </div>
           </div>
         </div>
       </div>
@@ -248,7 +263,7 @@
       <p class="help-p">任何檔案格式都可以 —— 圖片（JPG／PNG…）、PDF、Word、Excel、簡報、壓縮檔等都行。</p>
 
       <h3 class="help-h">大小限制</h3>
-      <p class="help-p">單一檔案上限 <b>10MB</b>。超過的檔案會被擋下並提示，不會被附加。</p>
+      <p class="help-p">單一檔案上限 <b>100MB</b>（🖼 圖片輸入 OCR 仍為 10MB）。超過的檔案會被擋下並提示，不會被附加。</p>
 
       <h3 class="help-h">三種輸入檔案的差別</h3>
       <p class="help-p"><b>📎 附加檔案</b>：原樣保留檔案當附件，Claude <b>不會讀取</b>內容。適合合約、收據、照片這類只想存著、日後打開的檔案。</p>

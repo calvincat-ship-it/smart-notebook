@@ -490,6 +490,12 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
   cursor: pointer;
 }
 .add-item-btn:active { background: var(--bg); }
+/* Row of category actions (＋ 新增項目 / 📎 上傳附件 / 📷 拍照) — wraps on mobile so
+   nothing is pushed off-screen. */
+.cat-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cat-actions .add-item-btn { margin-top: 8px; }
+.cat-upload-btn { color: var(--accent); border-color: var(--accent-soft); }
+.cat-attach { margin-top: 10px; }
 .head-btns { display: flex; gap: 14px; align-items: center; }
 
 /* Modal */
@@ -581,6 +587,10 @@ input.category-title { background: #fff; outline: 2px solid var(--accent-soft); 
 .cloud-status.cloud-warn { color: var(--amber); font-weight: 600; }
 .cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .cloud-actions .ghost-btn { flex: 1 1 auto; justify-content: center; }
+.cloud-storage { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cloud-storage select { width: 100%; }
+#driveQuota { margin: 0 0 8px; font-size: .86rem; white-space: pre-line; color: var(--ink); }
+#cacheClearBtn { margin-top: 8px; width: 100%; justify-content: center; }
 
 /* 記帳 (bookkeeping) */
 .expense-hint {
