@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v16.02';
+const APP_VERSION = 'v16.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -2398,7 +2398,17 @@ function renderCategories(orphans) {
     bigBtn.title = `超過 ${MAX_ATTACH_MB}MB 的大檔／要分享的檔案：上傳到你自己的 Google 雲端硬碟（可選擇是否分享），最大 ${MAX_BIGFILE_MB}MB。`;
     const bigInput = document.createElement('input');
     bigInput.type = 'file'; bigInput.multiple = true; bigInput.hidden = true;
-    bigBtn.addEventListener('click', () => bigInput.click());
+    // The Drive authorization popup can ONLY open from a direct button tap (not
+    // from the file picker's change event → popup_failed_to_open). So authorize
+    // here first; only open the picker once the scope is in hand (same gesture,
+    // no await before .click()).
+    bigBtn.addEventListener('click', async () => {
+      if (!cloudState.enabled) { toast('請先在設定連結 Google 帳號，才能上傳大檔到雲端硬碟。'); return; }
+      if (hasDriveFileScope()) { bigInput.click(); return; } // ready → open picker now
+      try { await ensureDriveFileScope(); }                  // this tap = a valid gesture for the popup
+      catch (e) { toast(e.message || String(e)); return; }
+      toast('已完成雲端硬碟授權 ✓ 請再按一次「☁️ 大檔上傳」選擇檔案。');
+    });
     bigInput.addEventListener('change', async (e) => {
       const files = Array.from(e.target.files || []); bigInput.value = '';
       if (files.length) await addCategoryBigFiles(cat, files);
@@ -2689,15 +2699,20 @@ async function driveFetch(url, opts, promptMode) {
   return res;
 }
 
-// Make sure the current token carries the drive.file scope (needed to write to the
-// user's visible Drive). A user who connected BEFORE drive.file was added holds an
-// appdata-only token and would silently get 403s with no consent prompt — so here
-// we force an INTERACTIVE token request, which is where Google shows the one-time
-// consent screen for the added scope. Must be called from a user gesture.
+function hasDriveFileScope() { return !!gisToken && grantedScopes.includes('drive.file'); }
+
+// Ensure the current token carries drive.file (needed to write to the user's
+// visible Drive). Tries a SILENT refresh first (no popup — works once the user has
+// granted drive.file before, e.g. on a later session). If still missing, opens the
+// INTERACTIVE consent popup — which only succeeds inside a direct user gesture
+// (a button tap), NOT inside a file-input change handler (that trips
+// popup_failed_to_open). Callers gate the file picker on this first.
 async function ensureDriveFileScope() {
-  if (gisToken && grantedScopes.includes('drive.file')) return;
+  if (hasDriveFileScope()) return;
+  try { gisToken = null; await getAccessToken('none'); } catch (e) { /* no silent session */ }
+  if (grantedScopes.includes('drive.file')) return;
   gisToken = null;
-  await getAccessToken(''); // interactive → prompts for the not-yet-granted scope
+  await getAccessToken(''); // interactive consent — needs a fresh user gesture
   if (!grantedScopes.includes('drive.file')) {
     throw new Error('尚未取得「存取你 Drive 檔案」的授權。請再按一次「☁️ 大檔上傳」，並在 Google 畫面按「允許」。');
   }
@@ -2870,10 +2885,9 @@ async function addCategoryBigFiles(cat, files) {
   if (!cat.id) cat.id = 'cat_' + genId();
   const bigList = files.filter((f) => f.size <= MAX_BIGFILE_BYTES);
   if (!bigList.length) { toast(`檔案超過 ${MAX_BIGFILE_MB}MB，無法上傳。`); return; }
-  // Get the drive.file authorization FIRST (closest to the user's tap), so the
-  // Google consent screen can appear before we start any Drive work.
-  try { await ensureDriveFileScope(); }
-  catch (e) { toast(e.message || String(e)); return; }
+  // Authorization was obtained on the button tap (the file picker only opens once
+  // the scope is granted). This is a non-popup guard for the unexpected case.
+  if (!hasDriveFileScope()) { toast('尚未完成雲端硬碟授權，請再按一次「☁️ 大檔上傳」。'); return; }
   // Ask about sharing once for the whole batch (the user chooses).
   const share = confirm('上傳後要讓「知道連結的人都能檢視」以便分享嗎？\n\n・按「確定」＝可分享（任何人有連結就能開）\n・按「取消」＝只有你自己能開（日後仍可到 Drive 再分享）');
   setLoading(true);
