@@ -23,6 +23,7 @@
     <button id="addInputBtn" class="icon-btn add-input-btn" title="新增記事" aria-label="新增記事">✏️</button>
     <button id="syncBtn" class="icon-btn" title="手動同步（與雲端比對，取最新）" aria-label="手動同步" hidden>🔄</button>
     <button id="expenseBtn" class="icon-btn" title="記帳" aria-label="記帳">💰</button>
+    <button id="helpBtn" class="icon-btn" title="使用說明" aria-label="使用說明">❓</button>
     <button id="settingsBtn" class="icon-btn" title="設定" aria-label="設定">⚙</button>
   </div>
 </header>
@@ -288,6 +289,91 @@
     </div>
     <div class="modal-footer">
       <button id="attachHelpDoneBtn" class="primary-btn">了解</button>
+    </div>
+  </div>
+</div>
+
+<!-- Usage guide modal -->
+<div id="helpModal" class="modal-backdrop" hidden>
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>❓ 使用說明</h2>
+      <button id="closeHelpBtn" class="icon-btn" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="help-p">把腦中零散的待辦、筆記、花費隨手丟進來，按「整理」就交給 Claude 幫你分類、抓出要辦的事、標好緊急程度與截止日。點下面每個標題可展開細節。</p>
+
+      <details class="settings-group" open>
+        <summary class="settings-group-summary"><span class="settings-group-title">✏️ 怎麼新增內容</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">按右上角 <b>✏️</b> 開啟輸入視窗，可以打字、<b>🎤 語音</b>輸入，或直接貼上一大段文字。想到什麼就一次丟進去，不用自己分類。</p>
+          <p class="help-p"><b>📎 附加檔案 / 📄 上傳 PDF / 🖼 圖片輸入（OCR）</b>三種檔案處理方式不同，細節見「📎 附件說明」。</p>
+          <p class="help-p"><b>📥 暫存</b>：先把這筆（含附加的檔案）存在本機，之後累積幾筆再一次「整理」，比較省用量。按<b>整理</b>才會送給 Claude 分析。</p>
+          <p class="help-p">整理時若新增的待辦和現有任務<b>同一天</b>，會先跳出提醒讓你確認，避免那天排太滿。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">📌 待辦任務（首頁）</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">明確「要辦的事」會進這裡，每件一張卡片，顏色代表緊急程度（紅＝緊急、黃＝普通、藍＝可暫緩）。可暫緩與已完成的任務會<b>疊成一疊收合</b>，點一下展開。</p>
+          <p class="help-p"><b>✏️ 編輯</b>：改截止日，並增／刪／改「說明事項」（這件事的細項提醒）。</p>
+          <p class="help-p"><b>勾選完成</b>後卡片移到已完成疊；可在「設定」設定完成幾天後自動刪除。</p>
+          <p class="help-p"><b>🔄 改為筆記</b>：Claude 判斷錯了、其實只是備忘，一鍵把任務丟回筆記本的「📥 未分類」。</p>
+          <p class="help-p"><b>📎 附加檔案</b>：可直接把檔案掛在某個任務上。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">📓 筆記本（分類 ▸ 子分類 ▸ 項目）</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">不是待辦、但值得留著的資訊會進筆記本，分成三層：<b>分類 ▸ 子分類 ▸ 項目</b>。頂端可切換「📌 待辦任務 / 📓 筆記本」兩頁。</p>
+          <p class="help-p">每一層都能<b>編輯名稱、新增、刪除</b>。空的子分類會保留、不會自動消失。</p>
+          <p class="help-p">每個<b>分類</b>可以「＋新增項目」，也能 <b>📎 上傳附件 / 📷 拍照</b>掛在該分類底下。</p>
+          <p class="help-p"><b>🔄 轉換</b>：單一項目可「改為待辦任務」；整個<b>子分類</b>也能改成一項任務（底下的項目會變成該任務的「說明事項」）。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">💰 記帳與掃描發票</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">按 <b>💰</b> 記一筆花費。支援 <b>📷 掃描電子發票 QR 碼</b>自動帶入金額與品項——完全在這台裝置本地解析，<b>不會上傳、不需金鑰</b>。（iOS 目前不支援掃描，可手動輸入。）</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">📅 整理時自動加入 Google 行事曆</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">在「設定 → 多裝置同步」開啟後（需先連結 Google 帳號），每次「整理」<b>新產生、且有截止日</b>的待辦任務，會自動幫你在 Google 行事曆建一個全天事件，卡片會標「📅 已加入行事曆 ✓」。</p>
+          <p class="help-p">開啟時可選要寫入哪個 Google 帳號的行事曆。由筆記本「子分類」改成的任務<b>不會</b>自動加入，需要時再手動加。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">☁️ 多裝置同步</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">在「設定」<b>🔗 連結 Google 帳號</b>後，筆記與任務會備份到你自己 Drive 的 App 私有隱藏資料夾，多台裝置<b>自動共用</b>。只需要「App 資料夾」權限，看不到你其他 Drive 檔案；金鑰等設定不會上雲。</p>
+          <p class="help-p">附件本體也存雲端，本機只留最近用過的當快取；快取上限可在設定調整。可隨時「⬆ 立即備份 / ⬇ 從雲端還原 / 🔄 更換帳號」。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">⚙ 設定裡有什麼</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p"><b>API 金鑰／中繼站</b>：填自己的 Anthropic 金鑰，或填共用中繼站網址＋存取碼（由中繼站保管金鑰）。<b>模型</b>：日常省成本選 Sonnet 5，要最準用 Opus 4.8。</p>
+          <p class="help-p"><b>已完成任務自動刪除、本機附件快取上限、API 用量</b>也都在設定裡。</p>
+        </div>
+      </details>
+
+      <details class="settings-group">
+        <summary class="settings-group-summary"><span class="settings-group-title">🔒 隱私</span></summary>
+        <div class="settings-group-body">
+          <p class="help-p">API 金鑰只存在這台裝置的瀏覽器，不上傳。附件存在你自己的 Google Drive 私有資料夾。Claude <b>不會讀取</b>你附加的檔案內容——只會看到你打的文字、PDF 抽取出的文字、以及你選 🖼 圖片輸入時交它辨識的圖。</p>
+        </div>
+      </details>
+    </div>
+    <div class="modal-footer">
+      <button id="helpDoneBtn" class="primary-btn">了解</button>
     </div>
   </div>
 </div>

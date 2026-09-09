@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v17.04';
+const APP_VERSION = 'v17.05';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -422,6 +422,10 @@ const els = {
   attachHelpModal: $('attachHelpModal'),
   closeAttachHelpBtn: $('closeAttachHelpBtn'),
   attachHelpDoneBtn: $('attachHelpDoneBtn'),
+  helpBtn: $('helpBtn'),
+  helpModal: $('helpModal'),
+  closeHelpBtn: $('closeHelpBtn'),
+  helpDoneBtn: $('helpDoneBtn'),
   stashBtn: $('stashBtn'),
   draftsBox: $('draftsBox'),
   draftsList: $('draftsList'),
@@ -3874,6 +3878,8 @@ function closeExpenses() {
 // Shared attachment-help modal, opened from the input area and task cards.
 function openAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = false; }
 function closeAttachHelp() { if (els.attachHelpModal) els.attachHelpModal.hidden = true; }
+function openHelp() { if (els.helpModal) els.helpModal.hidden = false; }
+function closeHelp() { if (els.helpModal) els.helpModal.hidden = true; }
 
 // Input modal (新增記事) — the input card + drafts area now live here, opened
 // from the header ✏️ button so the homepage shows only tasks and categories.
@@ -4329,6 +4335,14 @@ if (els.closeAttachHelpBtn) els.closeAttachHelpBtn.addEventListener('click', clo
 if (els.attachHelpDoneBtn) els.attachHelpDoneBtn.addEventListener('click', closeAttachHelp);
 if (els.attachHelpModal) els.attachHelpModal.addEventListener('click', (e) => {
   if (e.target === els.attachHelpModal) closeAttachHelp();
+});
+
+// Usage guide modal
+if (els.helpBtn) els.helpBtn.addEventListener('click', openHelp);
+if (els.closeHelpBtn) els.closeHelpBtn.addEventListener('click', closeHelp);
+if (els.helpDoneBtn) els.helpDoneBtn.addEventListener('click', closeHelp);
+if (els.helpModal) els.helpModal.addEventListener('click', (e) => {
+  if (e.target === els.helpModal) closeHelp();
 });
 els.expStartDate.addEventListener('change', () => {
   expStartFilter = /^\d{4}-\d{2}-\d{2}$/.test(els.expStartDate.value) ? els.expStartDate.value : '';
