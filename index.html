@@ -228,6 +228,11 @@
               <p class="field-note">附件本體存在雲端；本機只保留最近用過的當「快取」，超過上限會自動清掉最舊的（雲端仍在，下次開啟自動再下載）。<span id="cacheUsage"></span></p>
               <button id="cacheClearBtn" class="ghost-btn" type="button">🧹 清空本機附件快取</button>
             </div>
+
+            <div class="cal-auto">
+              <label class="cal-auto-row"><input type="checkbox" id="autoCalToggle"> <span>整理時自動加入 Google 行事曆</span></label>
+              <p class="field-note">開啟後，每次「整理」新產生、且有截止日的待辦任務，會自動建立為你 Google 行事曆的全天事件（需一次性授權「行事曆」寫入權限）。由筆記本「子分類」改成的待辦任務不會自動加入，仍由你手動點「＋ 加入行事曆」。</p>
+            </div>
           </div>
         </div>
       </div>

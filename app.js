@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v17.02';
+const APP_VERSION = 'v17.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -23,6 +23,10 @@ const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.goo
 //                 Drive — used to upload big files there and get a shareable link.
 //                 Adding this scope triggers a one-time Google re-consent prompt.
 const DRIVE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
+// Calendar write scope — requested via its OWN token client (separate from Drive),
+// only when the user turns on 「整理時自動加入行事曆」, so users who don't want it are
+// never asked for calendar permission.
+const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const CLOUD_FILENAME = 'notebook-backup.json';
 
 // Attachments: any file type, capped at 100MB each. The binary lives locally in
@@ -273,6 +277,7 @@ function normalizeState(s) {
       done: !!t.done,
       ...(['urgent', 'normal', 'low'].includes(t.priorityOverride) ? { priorityOverride: t.priorityOverride } : {}),
       ...(t.completedAt ? { completedAt: t.completedAt } : {}),
+      ...(t.calEventId ? { calEventId: t.calEventId } : {}), // Google Calendar event id (auto-added on 整理)
     };
   });
   const attachments = (Array.isArray(s.attachments) ? s.attachments : []).map((a) => ({
@@ -343,6 +348,7 @@ function loadSettings() {
     workerUrl: s.workerUrl || '',   // optional Cloudflare Worker relay endpoint
     accessCode: s.accessCode || '', // shared access code the relay checks
     cacheBudgetMB: s.cacheBudgetMB || '500', // local attachment-cache cap: '200'|'500'|'1024'|'2048'|'4096'|'never'
+    autoAddCalendar: !!s.autoAddCalendar,   // auto-create Google Calendar events for new dated tasks on 整理
   };
 }
 function saveSettings() {
@@ -474,6 +480,7 @@ const els = {
   cloudDisconnectBtn: $('cloudDisconnectBtn'),
   driveQuota: $('driveQuota'),
   cacheBudgetSelect: $('cacheBudgetSelect'),
+  autoCalToggle: $('autoCalToggle'),
   cacheUsage: $('cacheUsage'),
   cacheClearBtn: $('cacheClearBtn'),
   loadingOverlay: $('loadingOverlay'),
@@ -1166,7 +1173,7 @@ async function processInput() {
       state.categories = mergeCategories(result.categories);
     }
     // tasks: append newly found (dedupe by task+dueDate), text links → id links
-    if (Array.isArray(result.tasks)) appendTasks(result.tasks);
+    const newTasks = Array.isArray(result.tasks) ? appendTasks(result.tasks) : [];
     // expenses: consumption records → 記帳 store (dedupe by item+amount+date)
     if (Array.isArray(result.expenses)) appendExpenses(result.expenses);
 
@@ -1193,7 +1200,15 @@ async function processInput() {
     els.inputText.value = '';
     clearPending();
     closeInputModal();
-    toast('整理完成 ✓');
+
+    // Auto-add newly-created dated tasks to Google Calendar (opt-in setting). Tasks
+    // made by converting a 子分類 → task are NOT auto-added (that path stays manual).
+    let calMsg = '';
+    if (settings.autoAddCalendar && cloudState.enabled && newTasks.length) {
+      calMsg = await autoAddCalendarForTasks(newTasks);
+      if (calMsg) render(); // refresh cards to show the 已加入行事曆 marker
+    }
+    toast('整理完成 ✓' + calMsg);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1268,6 +1283,7 @@ function mergeCategories(returned) {
 }
 
 function appendTasks(tasks) {
+  const created = [];
   for (const t of tasks) {
     if (!t.task) continue;
     const dup = state.tasks.some(
@@ -1281,7 +1297,7 @@ function appendTasks(tasks) {
       .map((d) => (typeof d === 'string' ? d : (d && d.text) || ''))
       .filter((x) => x.trim() !== '')
       .map((text) => ({ id: genId(), text }));
-    state.tasks.push({
+    const nt = {
       id: 'tk_' + genId(),
       task: t.task,
       dueDate: t.dueDate || '',
@@ -1290,8 +1306,11 @@ function appendTasks(tasks) {
       desc,
       linkedItemIds: [],
       done: false,
-    });
+    };
+    state.tasks.push(nt);
+    created.push(nt);
   }
+  return created;
 }
 
 function weekdayZh(ymd) {
@@ -2078,12 +2097,20 @@ function renderTasks() {
       cat.textContent = t.sourceCategory;
       metaRow.appendChild(cat);
     }
+    // Marker when this task was already auto-added to Google Calendar on 整理.
+    if (t.calEventId) {
+      const added = document.createElement('span');
+      added.className = 'cal-added';
+      added.textContent = '📅 已加入行事曆 ✓';
+      added.title = '整理時已自動建立為 Google 行事曆事件';
+      metaRow.appendChild(added);
+    }
     const cal = document.createElement('a');
     cal.className = 'cal-btn';
     cal.href = gcalLink(t);
     cal.target = '_blank';
     cal.rel = 'noopener';
-    cal.textContent = '＋ 加入行事曆';
+    cal.textContent = t.calEventId ? '＋ 再次加入' : '＋ 加入行事曆';
     metaRow.appendChild(cal);
 
     // Edit this task: time (截止日) + 說明事項 (add/edit/delete) + title.
@@ -2977,6 +3004,108 @@ async function fetchUserEmail() {
   return '';
 }
 
+/* ---------------- Google Calendar (auto-add on 整理) ---------------- */
+// A SEPARATE token client, so calendar consent is only ever asked when the user
+// opts in (turning on the setting), never bundled with the Drive connect flow.
+let calTokenClient = null;
+let calToken = '';
+let calTokenResolve = null;
+let calTokenReject = null;
+function settleCalToken(fn, arg) {
+  const r = fn === 'resolve' ? calTokenResolve : calTokenReject;
+  calTokenResolve = calTokenReject = null;
+  if (r) r(arg);
+}
+async function getCalToken(promptMode) {
+  if (!GOOGLE_CLIENT_ID) throw new Error('尚未設定 Google Client ID。');
+  await ensureGis();
+  return new Promise((resolve, reject) => {
+    if (calTokenReject) { const rej = calTokenReject; calTokenResolve = calTokenReject = null; rej(new Error('已被新的授權請求取代。')); }
+    calTokenResolve = resolve;
+    calTokenReject = reject;
+    try {
+      if (!calTokenClient) {
+        calTokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: CALENDAR_SCOPE,
+          callback: (resp) => {
+            if (resp && resp.access_token) { calToken = resp.access_token; settleCalToken('resolve', calToken); }
+            else settleCalToken('reject', new Error('未取得 Google 行事曆授權。'));
+          },
+          error_callback: (err) => settleCalToken('reject', new Error('行事曆授權未完成' + (err && err.type ? '（' + err.type + '）' : '') + '。')),
+        });
+      }
+      calTokenClient.requestAccessToken({ prompt: promptMode || '' });
+    } catch (e) { settleCalToken('reject', e); }
+  });
+}
+// Ensure a calendar token, INTERACTIVELY (needs a fresh user gesture — used from
+// the settings toggle). Tries silent first so a returning user isn't re-prompted.
+async function ensureCalendarScope() {
+  try { calToken = null; await getCalToken('none'); if (calToken) return; } catch (e) { /* no silent session */ }
+  calToken = null;
+  await getCalToken(''); // interactive consent
+  if (!calToken) throw new Error('尚未取得 Google 行事曆授權。');
+}
+async function calFetch(url, opts, promptMode) {
+  opts = opts || {};
+  if (!calToken) await getCalToken(promptMode);
+  const run = () => fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + calToken } });
+  let res = await run();
+  if (res.status === 401) { calToken = null; await getCalToken('none'); res = await run(); }
+  return res;
+}
+// Build an all-day event body for a task (matches the manual gcalLink behaviour).
+function calEventBody(t) {
+  const [y, m, d] = t.dueDate.split('-').map(Number);
+  const nx = new Date(y, m - 1, d + 1);
+  const endDate = nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0');
+  const descLines = [];
+  if (t.sourceCategory) descLines.push('主題：' + t.sourceCategory);
+  for (const dd of (t.desc || [])) if (dd.text) descLines.push('・' + dd.text);
+  descLines.push('（由智慧記事本整理時自動加入）');
+  return {
+    summary: t.task,
+    description: descLines.join('\n'),
+    start: { date: t.dueDate },
+    end: { date: endDate },
+  };
+}
+// Insert one task as an all-day Google Calendar event; records the event id on the
+// task so it isn't added twice. Returns true on success.
+async function addTaskToCalendar(t) {
+  const res = await calFetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(calEventBody(t)),
+  }, 'none');
+  if (!res.ok) throw new Error('行事曆寫入失敗（' + res.status + '）。');
+  const ev = await res.json();
+  t.calEventId = ev.id || 'added';
+  return true;
+}
+// Called after a 整理 when the setting is on: add newly-created, dated tasks to the
+// calendar. Best-effort — returns a short suffix for the completion toast.
+async function autoAddCalendarForTasks(newTasks) {
+  const targets = newTasks.filter((t) => /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate || '') && !t.calEventId);
+  if (!targets.length) return '';
+  try {
+    calToken = null;
+    await getCalToken('none'); // silent — scope was granted when enabling the setting
+  } catch (e) {
+    return '（行事曆自動加入需重新授權，請到設定關閉再開啟一次）';
+  }
+  if (!calToken) return '（行事曆自動加入需重新授權，請到設定關閉再開啟一次）';
+  let ok = 0, fail = 0;
+  for (const t of targets) {
+    try { await addTaskToCalendar(t); ok++; } catch (e) { fail++; }
+  }
+  if (ok) saveState();
+  if (ok && !fail) return `，並自動加入行事曆 ${ok} 筆 📅`;
+  if (ok && fail) return `，行事曆加入 ${ok} 筆、失敗 ${fail} 筆`;
+  return '（行事曆自動加入失敗，請到設定重新授權）';
+}
+
 async function driveFindFile(name, promptMode) {
   const q = encodeURIComponent(`name='${name}'`);
   const url = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name,modifiedTime)&pageSize=10`;
@@ -3386,6 +3515,10 @@ function cloudDisconnect() {
   cloudState.pendingBackup = false;
   cloudState.backupFailed = false;
   gisToken = null;
+  calToken = null;
+  // Auto-add-to-calendar depends on this Google account; turn it off on disconnect
+  // so it doesn't silently try (and fail) after re-connecting a different account.
+  settings.autoAddCalendar = false; saveSettings();
   saveCloudState();
   updateCloudUI();
   toast('已解除雲端連結（雲端資料保留）。');
@@ -3420,6 +3553,8 @@ async function cloudSwitchAccount() {
   try {
     // 1) Sign in to the NEW account first (force the account chooser).
     gisToken = null;
+    calToken = null;
+    settings.autoAddCalendar = false; saveSettings(); // must re-consent for the new account
     await getAccessToken('select_account');
     const email = await fetchUserEmail();
 
@@ -4148,6 +4283,7 @@ function openSettings() {
   els.modelSelect.value = settings.model || 'claude-opus-4-8';
   els.autoDeleteSelect.value = settings.autoDeleteDays || 'never';
   if (els.cacheBudgetSelect) els.cacheBudgetSelect.value = settings.cacheBudgetMB || '500';
+  if (els.autoCalToggle) els.autoCalToggle.checked = !!settings.autoAddCalendar;
   // Credential group: collapsed by default (keeps the sensitive fields tucked
   // away); auto-expanded only when nothing is configured yet, so first-time
   // setup is visible.
@@ -4223,6 +4359,35 @@ if (els.cloudBackupBtn) els.cloudBackupBtn.addEventListener('click', () => cloud
 if (els.cloudRestoreBtn) els.cloudRestoreBtn.addEventListener('click', cloudRestore);
 if (els.cloudSwitchBtn) els.cloudSwitchBtn.addEventListener('click', cloudSwitchAccount);
 if (els.cloudDisconnectBtn) els.cloudDisconnectBtn.addEventListener('click', cloudDisconnect);
+// Auto-add-to-calendar toggle. Enabling requests calendar consent RIGHT NOW (this
+// change is a user gesture — the only time the GIS popup can open reliably); the
+// setting is only saved as on once consent succeeds, so a later background 整理 can
+// get a silent token. Disabling just clears the flag.
+if (els.autoCalToggle) els.autoCalToggle.addEventListener('change', async () => {
+  if (!els.autoCalToggle.checked) {
+    settings.autoAddCalendar = false;
+    saveSettings();
+    toast('已關閉「整理時自動加入行事曆」');
+    return;
+  }
+  if (!cloudState.enabled) {
+    els.autoCalToggle.checked = false;
+    toast('請先連結 Google 帳號，才能自動加入行事曆。');
+    return;
+  }
+  try {
+    await ensureCalendarScope(); // interactive consent within this gesture
+  } catch (e) {
+    els.autoCalToggle.checked = false;
+    settings.autoAddCalendar = false;
+    saveSettings();
+    toast(e.message || '行事曆授權未完成，未開啟自動加入。');
+    return;
+  }
+  settings.autoAddCalendar = true;
+  saveSettings();
+  toast('已開啟：整理時會自動把有截止日的新任務加入 Google 行事曆 📅');
+});
 if (els.cacheClearBtn) els.cacheClearBtn.addEventListener('click', async () => {
   const pending = state.attachments.filter((a) => !a.driveFileId && cacheMeta[a.id]).length;
   const extra = pending ? `\n（有 ${pending} 個附件尚未上傳雲端，會保留、不清除。）` : '';

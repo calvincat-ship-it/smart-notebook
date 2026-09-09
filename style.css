@@ -638,6 +638,10 @@ input.subcat-title { background: #fff; outline: 2px solid var(--accent-soft); }
 .cloud-storage select { width: 100%; }
 #driveQuota { margin: 0 0 8px; font-size: .86rem; white-space: pre-line; color: var(--ink); }
 #cacheClearBtn { margin-top: 8px; width: 100%; justify-content: center; }
+.cal-auto { margin-top: 14px; }
+.cal-auto-row { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.cal-auto-row input { width: 18px; height: 18px; flex: 0 0 auto; }
+.cal-added { color: var(--accent); font-weight: 600; }
 
 /* 記帳 (bookkeeping) */
 .expense-hint {
