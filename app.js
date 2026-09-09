@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v16.03';
+const APP_VERSION = 'v17.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -73,6 +73,10 @@ const editingCats = new WeakSet();   // categories whose name is being edited (v
 let pendingEditCat = null;           // category to focus once it re-renders in edit mode
 const editingBullets = new Set();    // bullet ids being edited (via ✒); otherwise shown as links
 let pendingEditBullet = null;        // bullet id to focus once it re-renders in edit mode
+const editingSubs = new Set();       // subcategory (子分類) ids whose title is being edited (via ✏️)
+let pendingEditSub = null;           // subcategory id to focus once it re-renders in edit mode
+const editingTasks = new Set();      // task ids whose card is open in edit mode (time + 說明事項)
+let pendingDescFocusIdx = -1;        // index of a just-added 說明 row to focus after re-render
 // Which sub-page is showing. 待辦任務 is the home page; 筆記本 is the other.
 // Session-only (starts on tasks each open), like the other view-state above.
 let currentPage = 'tasks';           // 'tasks' | 'notes'
@@ -226,6 +230,7 @@ function normalizeState(s) {
     if (!c.id) c.id = 'cat_' + genId(); // stable id so files can be attached to a category
     c.subsections = Array.isArray(c.subsections) ? c.subsections : [];
     for (const sub of c.subsections) {
+      if (!sub.id) sub.id = 'sub_' + genId(); // stable id so a 子分類 can be edited/expanded/converted
       sub.bullets = (Array.isArray(sub.bullets) ? sub.bullets : []).map((b) => {
         const bullet = (typeof b === 'string')
           ? { id: genId(), text: b }
@@ -250,12 +255,20 @@ function normalizeState(s) {
         if (id) linkedItemIds.push(id);
       }
     }
+    // 說明事項 (description items) — a task's sub-points. Each { id, text }. Migrate
+    // from an array of plain strings (or objects) written by earlier versions.
+    const desc = (Array.isArray(t.desc) ? t.desc : []).map((d) => (
+      typeof d === 'string'
+        ? { id: genId(), text: d }
+        : { id: (d && d.id) ? d.id : genId(), text: (d && typeof d.text === 'string') ? d.text : '' }
+    )).filter((d) => d.text.trim() !== '');
     return {
       id: t.id || ('tk_' + genId()),
       task: t.task || '',
       dueDate: t.dueDate || '',
       importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
       sourceCategory: t.sourceCategory || '',
+      desc,
       linkedItemIds,
       done: !!t.done,
       ...(['urgent', 'normal', 'low'].includes(t.priorityOverride) ? { priorityOverride: t.priorityOverride } : {}),
@@ -749,8 +762,9 @@ function buildSchema(hasAttachments) {
             dueDate: { type: 'string' },
             importance: { type: 'string', enum: ['high', 'medium', 'low'] },
             sourceCategory: { type: 'string' },
+            desc: { type: 'array', items: { type: 'string' } },
           },
-          required: ['task', 'dueDate', 'importance', 'sourceCategory'],
+          required: ['task', 'dueDate', 'importance', 'sourceCategory', 'desc'],
           additionalProperties: false,
         },
       },
@@ -800,16 +814,18 @@ const SYSTEM_PROMPT = [
   '判斷不確定時，若讀起來像「一件要去做的事」就當 task，像「一則要記住／參考的資訊」就當筆記。同一件事不可同時出現在 tasks 和 categories。',
   '',
   '關於 tasks：',
-  '1. 把明確待辦整理成 tasks。每筆有 task（事項描述）、dueDate、importance、sourceCategory。',
+  '1. 把明確待辦整理成 tasks。每筆有 task（事項標題，一句話講清楚要做什麼）、dueDate、importance、sourceCategory、desc（說明事項）。',
   '   dueDate 一律用 YYYY-MM-DD 格式；沒有明確日期就留空字串。相對日期（例如「下週三」「月底前」）請依使用者提供的今天日期換算成實際日期。',
   '   importance（重要性）只能是 high / medium / low，依「任務本身的影響與後果」判斷——攸關考核／法規期限／對他人有重大影響＝high；例行、可有可無、影響很小＝low；其餘＝medium。importance 只看任務本身的份量，不要把「時間急不急」算進去（急迫程度由 App 依截止日另外計算）。',
   '   sourceCategory＝這件事所屬的主題／情境的簡短詞（例如「部門會議」「評鑑」），沒有就留空字串。',
+  '   desc＝這件事的「說明事項」，用簡短條列（字串陣列）列出要做的細項、注意事項、要帶的東西等；若沒有可補充的細節就給空陣列 []。不要把 task 標題本身重複放進 desc。',
   '   tasks 只回傳「這次新內容」中新發現的待辦，不要重複回傳既有內容裡的任務。',
   '',
-  '關於 categories（筆記本）：',
-  '2. 把非待辦內容整理成「有邏輯層次的階層式標題與條列」。分類的類別（categories 的 title）由你自行決定，不需要問使用者。相近的內容歸到同一類，每一類底下用 subsections（子標題 heading + 條列 bullets）呈現。',
-  '3. 你會收到目前既有的分類（現有 categories 的 JSON）。請把新內容「合併」進去：能歸入既有類別就歸入，需要新類別就新增。',
-  '   重要：既有條列與子標題的文字請「原封不動保留」，不要改寫或刪除使用者既有的內容，只新增。回傳的 categories 必須是「合併後的完整結果」（包含既有的與新增的）。既有分類中若有你判斷屬於待辦的條列，也不要把它搬到 tasks（那是使用者自己整理的，保持原樣）。',
+  '關於 categories（筆記本）——三層階層「分類 ▸ 子分類 ▸ 項目」：',
+  '2. 把非待辦內容整理成三層結構。第一層＝分類（categories 的 title，大主題）；第二層＝子分類（subsections 的 heading，該主題下的一個小標題／子題，「必須」給非空字串）；第三層＝項目（bullets，子分類底下的細項條列）。分類與子分類名稱由你自行決定，不需詢問使用者。相近內容歸到同一分類，再依子題分成不同子分類。',
+  '   即使某個子分類只有一條項目，也要放在一個有明確 heading 的子分類底下；不要輸出 heading 為空字串的 subsection。',
+  '3. 你會收到目前既有的分類（現有 categories 的 JSON）。請把新內容「合併」進去：能歸入既有分類／子分類就歸入，需要新的就新增。',
+  '   重要：既有項目、子分類與分類的文字請「原封不動保留」，不要改寫或刪除使用者既有的內容，只新增。回傳的 categories 必須是「合併後的完整結果」（包含既有的與新增的）。既有內容中若有你判斷屬於待辦的項目，也不要把它搬到 tasks（那是使用者自己整理的，保持原樣）。',
   '',
   '關於 expenses（記帳，第三個獨立去處）：',
   '4. 消費／支出類的內容（例如買了東西、花了多少錢、付款、繳費、帳單、含金額的開銷）請「只」整理進 expenses，「不要」放進 categories 或 tasks，也「不要」為它建立「財務紀錄」「花費」之類的分類——這些消費紀錄會呈現在獨立的「記帳」介面。每筆 expense 欄位：item＝品項或用途（簡短，例如「午餐便當」「加油」）；amount＝金額，只放阿拉伯數字（不含貨幣符號、不含逗號，台幣通常是整數）；date＝消費日期 YYYY-MM-DD（內容沒寫日期就用上面提供的今天日期）；category＝你判斷的消費分類，用繁體中文簡短詞（例如 餐飲／交通／購物／娛樂／居家／醫療／教育／其他）。',
@@ -1240,6 +1256,7 @@ function mergeCategories(returned) {
     id: idByTitle.get(c.title || '未命名分類') || ('cat_' + genId()),
     title: c.title || '未命名分類',
     subsections: (Array.isArray(c.subsections) ? c.subsections : []).map((s) => ({
+      id: 'sub_' + genId(),
       heading: s.heading || '',
       bullets: (Array.isArray(s.bullets) ? s.bullets : []).map((bt) => {
         const text = typeof bt === 'string' ? bt : (bt && bt.text) || '';
@@ -1260,12 +1277,17 @@ function appendTasks(tasks) {
     // New model: a task and a note never overlap, so a task starts with no linked
     // bullets. linkedItemIds is now used only to bind files the user attaches to
     // this task card (keyed by the task's own id — see addTaskAttachments).
+    const desc = (Array.isArray(t.desc) ? t.desc : [])
+      .map((d) => (typeof d === 'string' ? d : (d && d.text) || ''))
+      .filter((x) => x.trim() !== '')
+      .map((text) => ({ id: genId(), text }));
     state.tasks.push({
       id: 'tk_' + genId(),
       task: t.task,
       dueDate: t.dueDate || '',
       importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
       sourceCategory: t.sourceCategory || '',
+      desc,
       linkedItemIds: [],
       done: false,
     });
@@ -1587,7 +1609,10 @@ function orphanAttachments() {
   for (const c of state.categories)
     for (const sub of c.subsections || [])
       for (const b of sub.bullets || []) live.add(b.id);
-  for (const t of state.tasks) live.add(t.id); // files attached straight to a task card
+  for (const t of state.tasks) {
+    live.add(t.id); // files attached straight to a task card
+    for (const d of t.desc || []) live.add(d.id); // files carried onto a task's 說明事項 (from a converted 子分類)
+  }
   for (const c of state.categories) if (c.id) live.add(c.id); // files uploaded to a category
   return state.attachments.filter((a) => !(a.linkedItemIds || []).some((id) => live.has(id)));
 }
@@ -1631,9 +1656,12 @@ function removeBulletsByIds(ids) {
     for (const sub of c.subsections || []) {
       const before = (sub.bullets || []).length;
       sub.bullets = (sub.bullets || []).filter((b) => !idSet.has(b.id));
-      if (sub.bullets.length !== before) affected.add(c);
+      if (sub.bullets.length !== before) { affected.add(c); if (before > 0 && sub.bullets.length === 0) sub._justEmptied = true; }
     }
-    c.subsections = (c.subsections || []).filter((sub) => (sub.bullets || []).length > 0);
+    // Only remove subsections THIS call emptied (before>0, now 0). An empty 子分類
+    // the user created (or emptied by hand) is intentional and must be kept.
+    c.subsections = (c.subsections || []).filter((sub) => !(sub.bullets.length === 0 && sub._justEmptied));
+    for (const sub of c.subsections || []) delete sub._justEmptied;
   }
   // Auto-remove a category whose last bullet was just deleted. Only categories we
   // actually removed a bullet from are considered — a freshly-created empty
@@ -2058,6 +2086,20 @@ function renderTasks() {
     cal.textContent = '＋ 加入行事曆';
     metaRow.appendChild(cal);
 
+    // Edit this task: time (截止日) + 說明事項 (add/edit/delete) + title.
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'cal-btn task-edit-btn';
+    editBtn.textContent = '✏️ 編輯';
+    editBtn.title = '編輯任務時間與說明事項';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editingTasks.add(t.id);
+      expandedTasks.add(t.id); // ensure the card is open while editing
+      renderTasks();
+    });
+    metaRow.appendChild(editBtn);
+
     // Move this item over to 筆記本 (in case the AI mis-filed it as a task).
     const toNote = document.createElement('button');
     toNote.type = 'button';
@@ -2106,17 +2148,34 @@ function renderTasks() {
     }
 
     main.appendChild(badgeRow);
-    main.appendChild(text);
-    if (expanded) {
-      main.appendChild(metaRow);
+    const isEditing = editingTasks.has(t.id);
+    if (isEditing) {
+      main.appendChild(text);
+      main.appendChild(buildTaskEditor(t));
+    } else {
+      main.appendChild(text);
+      if (expanded) {
+        // 說明事項 (description items) — a read-only list under the title.
+        if (t.desc && t.desc.length) {
+          const ul = document.createElement('ul');
+          ul.className = 'task-desc';
+          for (const d of t.desc) {
+            const li = document.createElement('li');
+            linkifyInto(li, d.text);
+            ul.appendChild(li);
+          }
+          main.appendChild(ul);
+        }
+        main.appendChild(metaRow);
 
-      // Attachments that belong to this task's note items — openable right here.
-      const atts = attachmentsForItems(t.linkedItemIds);
-      if (atts.length) {
-        const attRow = document.createElement('div');
-        attRow.className = 'attach-row';
-        for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
-        main.appendChild(attRow);
+        // Attachments that belong to this task's note items — openable right here.
+        const atts = attachmentsForItems(t.linkedItemIds);
+        if (atts.length) {
+          const attRow = document.createElement('div');
+          attRow.className = 'attach-row';
+          for (const a of atts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+          main.appendChild(attRow);
+        }
       }
     }
 
@@ -2131,6 +2190,142 @@ function renderTasks() {
     item.appendChild(del);
     return item;
   }
+}
+
+// Inline editor for a task (opened by ✏️ 編輯): edit the title, the 截止日 (time),
+// and the 說明事項 (add / edit / delete). Text fields commit on input WITHOUT a
+// re-render (so focus is kept); structural changes (add/delete a 說明, done) re-render.
+function buildTaskEditor(t) {
+  if (!Array.isArray(t.desc)) t.desc = [];
+  const box = document.createElement('div');
+  box.className = 'task-editor';
+
+  const mkField = (labelText) => {
+    const wrap = document.createElement('label');
+    wrap.className = 'te-field';
+    const lab = document.createElement('span');
+    lab.className = 'te-label';
+    lab.textContent = labelText;
+    wrap.appendChild(lab);
+    return wrap;
+  };
+
+  // Title
+  const titleField = mkField('任務');
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'te-input';
+  titleInput.value = t.task || '';
+  titleInput.placeholder = '任務標題';
+  titleInput.addEventListener('input', () => { t.task = titleInput.value; saveStateQuiet(); });
+  titleInput.addEventListener('blur', () => { t.task = titleInput.value.trim(); saveState(); });
+  titleField.appendChild(titleInput);
+  box.appendChild(titleField);
+
+  // Due date (時間)
+  const dateField = mkField('截止日');
+  const dateInput = document.createElement('input');
+  dateInput.type = 'date';
+  dateInput.className = 'te-input te-date';
+  dateInput.value = /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate || '') ? t.dueDate : '';
+  dateInput.addEventListener('change', () => {
+    t.dueDate = dateInput.value || '';
+    delete t.priorityOverride; // let the date drive 緊急程度 again after a date change
+    saveState();
+    renderTasks(); // due badge + sorting + priority depend on the date
+  });
+  dateField.appendChild(dateInput);
+  const clearDate = document.createElement('button');
+  clearDate.type = 'button';
+  clearDate.className = 'te-clear-date';
+  clearDate.textContent = '清除';
+  clearDate.title = '清除截止日';
+  clearDate.addEventListener('click', () => { t.dueDate = ''; saveState(); renderTasks(); });
+  dateField.appendChild(clearDate);
+  box.appendChild(dateField);
+
+  // 說明事項 (description items)
+  const descLabel = document.createElement('div');
+  descLabel.className = 'te-label te-desc-label';
+  descLabel.textContent = '說明事項';
+  box.appendChild(descLabel);
+
+  const descList = document.createElement('div');
+  descList.className = 'te-desc-list';
+  (t.desc || []).forEach((d) => {
+    const row = document.createElement('div');
+    row.className = 'te-desc-row';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'te-input';
+    input.value = d.text || '';
+    input.placeholder = '說明事項…';
+    input.addEventListener('input', () => { d.text = input.value; saveStateQuiet(); });
+    input.addEventListener('blur', () => { d.text = input.value.trim(); saveState(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); addDescRow(); }
+    });
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'te-desc-del';
+    rm.textContent = '✕';
+    rm.title = '刪除這一項說明';
+    rm.addEventListener('click', () => {
+      t.desc = t.desc.filter((x) => x !== d);
+      // Drop any attachment that lived only on this 說明 item.
+      const survivors = [];
+      for (const att of state.attachments) {
+        if ((att.linkedItemIds || []).includes(d.id)) {
+          att.linkedItemIds = att.linkedItemIds.filter((id) => id !== d.id);
+          if (att.linkedItemIds.length === 0) { purgeAttachment(att); continue; }
+        }
+        survivors.push(att);
+      }
+      state.attachments = survivors;
+      saveState();
+      renderTasks();
+    });
+    if (d === t.desc[pendingDescFocusIdx]) {
+      setTimeout(() => { input.focus(); }, 0);
+    }
+    row.appendChild(input);
+    row.appendChild(rm);
+    descList.appendChild(row);
+  });
+  pendingDescFocusIdx = -1;
+  box.appendChild(descList);
+
+  function addDescRow() {
+    if (!Array.isArray(t.desc)) t.desc = [];
+    t.desc.push({ id: genId(), text: '' });
+    pendingDescFocusIdx = t.desc.length - 1;
+    saveState();
+    renderTasks();
+  }
+
+  const controls = document.createElement('div');
+  controls.className = 'te-controls';
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'te-add-desc';
+  addBtn.textContent = '＋ 新增說明';
+  addBtn.addEventListener('click', addDescRow);
+  const doneBtn = document.createElement('button');
+  doneBtn.type = 'button';
+  doneBtn.className = 'te-done';
+  doneBtn.textContent = '完成編輯';
+  doneBtn.addEventListener('click', () => {
+    t.task = (t.task || '').trim();
+    t.desc = (t.desc || []).filter((d) => (d.text || '').trim() !== '' || attachmentsForBullet(d.id).length);
+    editingTasks.delete(t.id);
+    saveState();
+    renderTasks();
+  });
+  controls.appendChild(addBtn);
+  controls.appendChild(doneBtn);
+  box.appendChild(controls);
+
+  return box;
 }
 
 function renderCategories(orphans) {
@@ -2233,42 +2428,84 @@ function renderCategories(orphans) {
     const bodyEl = document.createElement('div');
     bodyEl.className = 'category-body';
     bodyEl.hidden = !expanded;
-    if (totalBullets === 0 && catAttCount === 0) {
+    if (subs.length === 0 && catAttCount === 0) {
       const hint = document.createElement('div');
       hint.className = 'cat-empty-hint';
-      hint.textContent = '把其他分類的項目拖曳到這裡，或用下方「＋ 新增項目 / 📎 上傳附件 / 📷 拍照」。';
+      hint.textContent = '用下方「＋ 新增子分類」建立一個子分類，再在裡面新增項目；或用「📎 上傳附件 / 📷 拍照」。';
       bodyEl.appendChild(hint);
     }
 
+    // Each subsection is a 子分類: an editable title + its 項目 (items) list. It
+    // has its own 🔄 (convert the whole 子分類 → a 待辦任務, items become the task's
+    // 說明事項) and 🗑 (delete the 子分類). Items are edited/deleted individually.
     subs.forEach((sub) => {
-      if (!sub.bullets || sub.bullets.length === 0) return;
       const subEl = document.createElement('div');
-      subEl.className = 'subsection';
-      if (sub.heading) {
-        const h = document.createElement('p');
-        h.className = 'sub-heading';
-        h.textContent = sub.heading;
-        subEl.appendChild(h);
+      subEl.className = 'subcat';
+
+      const subHead = document.createElement('div');
+      subHead.className = 'subcat-head';
+      const subEditing = editingSubs.has(sub.id);
+      let subTitle;
+      if (subEditing) {
+        subTitle = document.createElement('input');
+        subTitle.className = 'subcat-title';
+        subTitle.value = sub.heading || '';
+        subTitle.placeholder = '子分類名稱';
+        const commit = () => {
+          editingSubs.delete(sub.id);
+          sub.heading = subTitle.value.trim();
+          saveState();
+          renderCategories();
+        };
+        subTitle.addEventListener('blur', commit);
+        subTitle.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); subTitle.blur(); } });
+      } else {
+        subTitle = document.createElement('span');
+        subTitle.className = 'subcat-title' + (sub.heading ? '' : ' placeholder');
+        subTitle.textContent = sub.heading || '未命名子分類';
       }
+      const subEdit = document.createElement('button');
+      subEdit.className = 'subcat-edit';
+      subEdit.textContent = '✏️';
+      subEdit.title = '編輯子分類名稱';
+      subEdit.setAttribute('aria-label', '編輯子分類名稱');
+      subEdit.hidden = subEditing;
+      subEdit.addEventListener('click', () => { editingSubs.add(sub.id); pendingEditSub = sub.id; renderCategories(); });
+
+      const subToTask = document.createElement('button');
+      subToTask.className = 'subcat-totask';
+      subToTask.textContent = '🔄';
+      subToTask.title = '把整個子分類改為待辦任務（項目會變成該任務的說明事項）';
+      subToTask.setAttribute('aria-label', '改為待辦任務');
+      subToTask.hidden = subEditing;
+      subToTask.addEventListener('click', () => convertSubToTask(cat, sub));
+
+      const subDel = document.createElement('button');
+      subDel.className = 'subcat-del';
+      subDel.textContent = '🗑';
+      subDel.title = '刪除整個子分類';
+      subDel.setAttribute('aria-label', '刪除子分類');
+      subDel.addEventListener('click', () => deleteSubcategory(cat, sub));
+
+      subHead.appendChild(subTitle);
+      subHead.appendChild(subEdit);
+      subHead.appendChild(subToTask);
+      subHead.appendChild(subDel);
+      subEl.appendChild(subHead);
+
       const ul = document.createElement('ul');
       ul.className = 'bullets';
-      sub.bullets.forEach((b, bi) => {
+      (sub.bullets || []).forEach((b) => {
         const li = document.createElement('li');
         li.className = 'bullet';
 
         const row = document.createElement('div');
         row.className = 'bullet-row';
 
-        const handle = document.createElement('span');
-        handle.className = 'drag-handle';
-        handle.textContent = '⠿';
-        handle.title = '按住拖曳到其他分類';
-        handle.addEventListener('pointerdown', (e) => startBulletDrag(e, { cat, sub, bi, bulletId: b.id, text: b.text }));
-
         // Two modes, mirroring the category-title pattern (v12.04): by default the
-        // note is a read-only span whose URLs/phones/emails are tappable links;
+        // item is a read-only span whose URLs/phones/emails are tappable links;
         // the ✒ button switches it to plain editable text so links can't fight
-        // with "tap to edit". Editing commits on blur/Enter (empty → delete).
+        // with "tap to edit". Editing commits on blur/Enter (empty → delete item).
         const editingBullet = editingBullets.has(b.id);
         const span = document.createElement('span');
         span.className = 'bullet-text';
@@ -2279,7 +2516,7 @@ function renderCategories(orphans) {
             editingBullets.delete(b.id);
             const v = span.textContent.trim();
             if (v) { b.text = v; saveState(); renderCategories(); }
-            else { removeBulletsByIds([b.id]); saveState(); render(); }
+            else { deleteItem(cat, sub, b, { silent: true }); }
           };
           span.addEventListener('blur', commit);
           span.addEventListener('keydown', (e) => {
@@ -2292,8 +2529,8 @@ function renderCategories(orphans) {
         const bEdit = document.createElement('button');
         bEdit.className = 'bullet-edit';
         bEdit.textContent = '✒';
-        bEdit.title = '編輯這一條';
-        bEdit.setAttribute('aria-label', '編輯這一條');
+        bEdit.title = '編輯這一項';
+        bEdit.setAttribute('aria-label', '編輯這一項');
         bEdit.hidden = editingBullet;
         bEdit.addEventListener('click', () => {
           editingBullets.add(b.id);
@@ -2301,40 +2538,24 @@ function renderCategories(orphans) {
           renderCategories();
         });
 
-        const bMove = document.createElement('button');
-        bMove.className = 'bullet-move';
-        bMove.textContent = '🔄';
-        bMove.title = '改為待辦任務';
-        bMove.setAttribute('aria-label', '改為待辦任務');
-        bMove.hidden = editingBullet;
-        bMove.addEventListener('click', () => convertBulletToTask(cat, sub, bi, b));
-
         const bDel = document.createElement('button');
         bDel.className = 'bullet-del';
         bDel.textContent = '✕';
-        bDel.title = '刪除這一條';
-        bDel.addEventListener('click', () => {
-          const atts = attachmentsForBullet(b.id);
-          if (atts.length && !confirm(`刪除這一條筆記？\n對應的 ${atts.length} 個附加檔案也會一併刪除。`)) return;
-          removeBulletsByIds([b.id]);
-          saveState();
-          render();
-        });
+        bDel.title = '刪除這一項';
+        bDel.addEventListener('click', () => deleteItem(cat, sub, b));
 
-        row.appendChild(handle);
         row.appendChild(span);
         row.appendChild(bEdit);
-        row.appendChild(bMove);
         row.appendChild(bDel);
         li.appendChild(row);
 
-        // Just entered edit mode for this bullet → focus & place caret at the end.
+        // Just entered edit mode for this item → focus & place caret at the end.
         if (editingBullet && b.id === pendingEditBullet) {
           pendingEditBullet = null;
           setTimeout(() => { span.focus(); placeCaretEnd(span); }, 0);
         }
 
-        // Files attached to this note item.
+        // Files attached to this item.
         const atts = attachmentsForBullet(b.id);
         if (atts.length) {
           const attRow = document.createElement('div');
@@ -2346,7 +2567,20 @@ function renderCategories(orphans) {
         ul.appendChild(li);
       });
       subEl.appendChild(ul);
+
+      const addItemBtn = document.createElement('button');
+      addItemBtn.className = 'add-item-btn add-sub-item';
+      addItemBtn.textContent = '＋ 新增項目';
+      addItemBtn.addEventListener('click', () => addItem(cat, sub));
+      subEl.appendChild(addItemBtn);
+
       bodyEl.appendChild(subEl);
+
+      // Just created / started editing this 子分類 → focus its title field.
+      if (subEditing && sub.id === pendingEditSub) {
+        pendingEditSub = null;
+        setTimeout(() => { subTitle.focus(); subTitle.select && subTitle.select(); }, 0);
+      }
     });
 
     // Files uploaded to the category itself (not tied to any one note item).
@@ -2360,11 +2594,11 @@ function renderCategories(orphans) {
 
     const actions = document.createElement('div');
     actions.className = 'cat-actions';
-    const addItemBtn = document.createElement('button');
-    addItemBtn.className = 'add-item-btn';
-    addItemBtn.textContent = '＋ 新增項目';
-    addItemBtn.addEventListener('click', () => addItem(cat));
-    actions.appendChild(addItemBtn);
+    const addSubBtn = document.createElement('button');
+    addSubBtn.className = 'add-item-btn';
+    addSubBtn.textContent = '＋ 新增子分類';
+    addSubBtn.addEventListener('click', () => addSubcategory(cat));
+    actions.appendChild(addSubBtn);
 
     // 📎 上傳附件 — any file (incl. large ones up to the cap). 📷 拍照 opens the
     // camera on mobile via the capture attribute (a normal file picker on desktop).
@@ -2463,24 +2697,77 @@ function renderCategories(orphans) {
 function getGeneralSub(cat) {
   if (!cat.subsections) cat.subsections = [];
   let s = cat.subsections.find((x) => !x.heading);
-  if (!s) { s = { heading: '', bullets: [] }; cat.subsections.push(s); }
+  if (!s) { s = { id: 'sub_' + genId(), heading: '', bullets: [] }; cat.subsections.push(s); }
+  if (!s.id) s.id = 'sub_' + genId();
   return s;
 }
-function cleanupEmptySub(cat, sub) {
-  if (sub.bullets.length === 0) {
-    const i = cat.subsections.indexOf(sub);
-    if (i > -1) cat.subsections.splice(i, 1);
-  }
-}
-function addItem(cat) {
-  expandedCats.add(cat); // keep it open so the new (focused) item is visible
-  const s = getGeneralSub(cat);
+// Add an item (項目) inside a specific 子分類 (subsection). The 3-level model has
+// no free-floating items: every item lives under a 子分類.
+function addItem(cat, sub) {
+  expandedCats.add(cat); // keep the category open so the new (focused) item is visible
+  if (!Array.isArray(sub.bullets)) sub.bullets = [];
   const id = genId();
-  s.bullets.push({ id, text: '' });
+  sub.bullets.push({ id, text: '' });
   editingBullets.add(id);   // new item starts editable + focused (via pendingEditBullet)
   pendingEditBullet = id;
   saveState();
   renderCategories();
+}
+// Add a new 子分類 (subsection) to a category, starting in title-edit mode.
+function addSubcategory(cat) {
+  expandedCats.add(cat);
+  if (!Array.isArray(cat.subsections)) cat.subsections = [];
+  const sub = { id: 'sub_' + genId(), heading: '', bullets: [] };
+  cat.subsections.push(sub);
+  editingSubs.add(sub.id);
+  pendingEditSub = sub.id;
+  saveState();
+  renderCategories();
+}
+// Delete a single 項目 (item). Keeps its 子分類 and category (unlike the old
+// bullet delete, which pruned emptied subs/categories). silent → skip the confirm
+// (used when an inline edit is committed empty).
+function deleteItem(cat, sub, b, opts) {
+  opts = opts || {};
+  const atts = attachmentsForBullet(b.id);
+  if (!opts.silent && atts.length && !confirm(`刪除這一項？\n對應的 ${atts.length} 個附加檔案也會一併刪除。`)) return;
+  editingBullets.delete(b.id);
+  sub.bullets = (sub.bullets || []).filter((x) => x.id !== b.id);
+  // Drop attachments that belonged only to this item.
+  const survivors = [];
+  for (const att of state.attachments) {
+    if ((att.linkedItemIds || []).includes(b.id)) {
+      att.linkedItemIds = att.linkedItemIds.filter((id) => id !== b.id);
+      if (att.linkedItemIds.length === 0) { purgeAttachment(att); continue; }
+    }
+    survivors.push(att);
+  }
+  state.attachments = survivors;
+  saveState();
+  render();
+}
+// Delete an entire 子分類 (subsection) and its items/attachments. Keeps the
+// category (the category has its own 🗑).
+function deleteSubcategory(cat, sub) {
+  const bulletIds = (sub.bullets || []).map((b) => b.id);
+  const atts = attachmentsForItems(bulletIds);
+  const n = bulletIds.length;
+  let msg = `刪除子分類「${sub.heading || '未命名子分類'}」？`;
+  if (n) msg += `\n底下的 ${n} 個項目也會一併刪除。`;
+  if (atts.length) msg += `\n含 ${atts.length} 個附加檔案，也會一併刪除。`;
+  if (!confirm(msg)) return;
+  for (const id of bulletIds) editingBullets.delete(id);
+  editingSubs.delete(sub.id);
+  cat.subsections = (cat.subsections || []).filter((s) => s !== sub);
+  const idSet = new Set(bulletIds);
+  const survivors = [];
+  for (const att of state.attachments) {
+    att.linkedItemIds = (att.linkedItemIds || []).filter((id) => !idSet.has(id));
+    if (att.linkedItemIds.length === 0) purgeAttachment(att); else survivors.push(att);
+  }
+  state.attachments = survivors;
+  saveState();
+  render();
 }
 function addCategory() {
   const cat = { id: 'cat_' + genId(), title: '新分類', subsections: [] };
@@ -2502,59 +2789,52 @@ function ensureUncategorized() {
 // The AI keeps the two pages mutually exclusive, but its judgement isn't perfect,
 // so each item carries a 🔄 button to move it to the other page by hand.
 
-// 待辦任務 → 筆記本. A legacy task whose note bullet still exists just drops the
-// task (the note already lives in the notebook); otherwise the task text becomes a
-// new bullet in 未分類, and any files attached to the task follow it.
+// 待辦任務 → 筆記本. The task becomes a 子分類 in 未分類: its title → 子分類 heading,
+// its 說明事項 → 項目 (reusing item ids so any attachments follow). Files attached to
+// the task card itself (keyed by the task id) are re-pointed onto an item.
 function convertTaskToNote(t) {
-  const linked = t.linkedItemIds || [];
-  const existingBullet = linked.find(bulletExists);
-  if (existingBullet) {
-    state.tasks = state.tasks.filter((x) => x.id !== t.id);
-    saveState();
-    render();
-    toast('已改為筆記（原本就有對應筆記）✓');
-    return;
-  }
   const cat = ensureUncategorized();
-  const sub = getGeneralSub(cat);
-  const newId = genId();
-  sub.bullets.push({ id: newId, text: t.task || '' });
-  // Re-point any files attached to the task (keyed by its own id) onto the bullet.
-  for (const att of state.attachments) {
-    if ((att.linkedItemIds || []).includes(t.id)) {
-      att.linkedItemIds = att.linkedItemIds.map((id) => (id === t.id ? newId : id));
-    }
+  if (!Array.isArray(cat.subsections)) cat.subsections = [];
+  const bullets = (t.desc || []).map((d) => ({ id: d.id, text: d.text }));
+  const ownAtts = state.attachments.filter((a) => (a.linkedItemIds || []).includes(t.id));
+  if (ownAtts.length) {
+    let target = bullets[0];
+    if (!target) { target = { id: genId(), text: t.task || '附件' }; bullets.push(target); }
+    for (const att of ownAtts) att.linkedItemIds = att.linkedItemIds.map((id) => (id === t.id ? target.id : id));
   }
+  const sub = { id: 'sub_' + genId(), heading: t.task || '', bullets };
+  cat.subsections.push(sub);
   state.tasks = state.tasks.filter((x) => x.id !== t.id);
+  editingTasks.delete(t.id);
   expandedCats.add(cat);
   saveState();
   render();
   toast('已改為筆記，放到「未分類」（切到「筆記本」分頁可看到）✓');
 }
 
-// 筆記本 → 待辦任務. The bullet text becomes a new task (no due date, medium
-// importance → App computes 緊急程度); its files follow onto the task's own id.
-// The bullet is removed from the notebook, cleaning up an emptied sub/category.
-function convertBulletToTask(cat, sub, bi, b) {
-  const newTaskId = 'tk_' + genId();
+// 筆記本 → 待辦任務 (at the 子分類 level). The 子分類 title → task title, its 項目 →
+// the task's 說明事項 (reusing item ids so their attachments follow). The 子分類 is
+// removed; an emptied category is cleaned up.
+function convertSubToTask(cat, sub) {
+  const desc = (sub.bullets || [])
+    .map((b) => ({ id: b.id, text: b.text }))
+    .filter((d) => d.text.trim() !== '' || attachmentsForBullet(d.id).length);
   const task = {
-    id: newTaskId,
-    task: b.text || '',
+    id: 'tk_' + genId(),
+    task: sub.heading || '',
     dueDate: '',
     importance: 'medium',
     sourceCategory: cat.title && cat.title !== UNCAT_TITLE ? cat.title : '',
-    linkedItemIds: [],
+    desc,
+    linkedItemIds: desc.map((d) => d.id), // attachments on these item ids surface on the card + cascade on delete
     done: false,
   };
-  const atts = attachmentsForBullet(b.id);
-  if (atts.length) {
-    task.linkedItemIds.push(newTaskId);
-    for (const att of atts) att.linkedItemIds = (att.linkedItemIds || []).map((id) => (id === b.id ? newTaskId : id));
-  }
   state.tasks.push(task);
-  sub.bullets.splice(bi, 1);
-  cleanupEmptySub(cat, sub);
-  if (categoryBulletCount(cat) === 0) state.categories = state.categories.filter((c) => c !== cat);
+  cat.subsections = (cat.subsections || []).filter((s) => s !== sub);
+  editingSubs.delete(sub.id);
+  if ((cat.subsections || []).length === 0 && categoryIsEmpty(cat)) {
+    state.categories = state.categories.filter((c) => c !== cat);
+  }
   saveState();
   render();
   toast('已改為待辦任務（切到「待辦任務」分頁可看到）✓');
@@ -2567,60 +2847,6 @@ function placeCaretEnd(el) {
   const sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(r);
-}
-
-/* ---------------- Drag a bullet between categories ---------------- */
-function startBulletDrag(e, src) {
-  e.preventDefault();
-  const ghost = document.createElement('div');
-  ghost.className = 'drag-ghost';
-  ghost.textContent = src.text || '（空白項目）';
-  document.body.appendChild(ghost);
-  moveGhost(ghost, e.clientX, e.clientY);
-
-  let target = null;
-  const onMove = (ev) => {
-    moveGhost(ghost, ev.clientX, ev.clientY);
-    ghost.style.visibility = 'hidden';
-    const el = document.elementFromPoint(ev.clientX, ev.clientY);
-    ghost.style.visibility = '';
-    const cat = el && el.closest ? el.closest('.category') : null;
-    if (target && target !== cat) target.classList.remove('drop-target');
-    target = cat;
-    if (cat) cat.classList.add('drop-target');
-  };
-  const onUp = () => {
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    document.removeEventListener('pointercancel', onUp);
-    ghost.remove();
-    if (target) {
-      target.classList.remove('drop-target');
-      const targetCat = state.categories[+target.dataset.ci];
-      if (targetCat) moveBullet(src, targetCat);
-    }
-  };
-  document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp);
-  document.addEventListener('pointercancel', onUp);
-}
-function moveGhost(g, x, y) { g.style.left = x + 'px'; g.style.top = y + 'px'; }
-
-function moveBullet(src, targetCat) {
-  const tsub = getGeneralSub(targetCat);
-  if (tsub === src.sub) return; // dropped back onto its own bucket — no-op
-  const text = src.sub.bullets.splice(src.bi, 1)[0];
-  if (text == null) { render(); return; }
-  tsub.bullets.push(text);
-  expandedCats.add(targetCat); // reveal where the item landed
-  cleanupEmptySub(src.cat, src.sub);
-  // If dragging the last bullet out emptied the source category, remove it (same
-  // rule as deleting the last bullet). The target still holds the moved bullet.
-  if (src.cat !== targetCat && categoryIsEmpty(src.cat)) {
-    state.categories = state.categories.filter((c) => c !== src.cat);
-  }
-  saveState();
-  render();
 }
 
 /* ---------------- Cloud sync (Google Drive appDataFolder) ---------------- */
