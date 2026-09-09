@@ -3,9 +3,17 @@
 > 收工時 Claude 更新這裡；開工時 Claude 先讀這裡。跟程式碼一起 git 同步。
 
 ## 最後更新
-- 時間：2026-09-08
+- 時間：2026-09-09（收工）
 - 機器：Desktop\claude code
-- 版本：**main = v16.03（已 push；GH Pages 依常規部署）**。新增 `cat.id`、`smart_notebook_cache_v1`；attachment `kind:'link'` 型；**DRIVE_SCOPE 含 `drive.file`**。向下相容。
+- 版本：**main = v17.04（已 push；GH Pages 依常規部署）**。task 新增 `desc`、subsection 新增 `id`；settings 新增 `autoAddCalendar`/`calendarEmail`；新增 `CALENDAR_SCOPE` + 獨立 cal token client。向下相容（舊資料自動遷移）。
+- 狀態：本機 node --check + 預覽實測通過、無 console error、全部 push main。**整理時自動加入 Google 行事曆已實機驗證通過**（測試事件成功建入 calvincat@ttct.edu.tw 行事曆）。
+
+## 本次區間（v17.00 → v17.04）＝筆記本三層階層＋任務編輯＋整理時自動加入行事曆
+> 完整索引見記憶 [[project_smart_notebook_architecture]] 的「2026-09-09 v17.00→v17.04」段。
+- **v17.00 筆記本三層可編輯階層「分類 ▸ 子分類 ▸ 項目」**：子分類=subsection（給 `sub.id`；可編輯名稱/新增 `addSubcategory`/刪除 `deleteSubcategory`），項目=bullet（可編輯/新增 `addItem(cat,sub)`/刪除 `deleteItem`，**保留空子分類**），**移除拖曳**。「改為待辦任務」移到**子分類層級** `convertSubToTask`（子分類→task、項目→task.desc）；`convertTaskToNote` 改 task→子分類。**task 新增 `desc:[{id,text}]` 說明事項**；**任務編輯 ✏️** `buildTaskEditor`（改截止日+說明事項增刪改）。⚠ `removeBulletsByIds` 改成只清「本次清空(before>0→0)」的 sub，避免誤刪空子分類。
+- **v17.01→v17.02 共用附件顯示位置**：同一「子分類」被 2+ 項目共用的附件只在**該子分類最底部**顯示一次（`subSharedIds`）；分類卡片底部只留「上傳到分類本身」的附件。
+- **v17.03→v17.04 整理時自動加入 Google 行事曆（Calendar API，opt-in）**：設定開關 `settings.autoAddCalendar`（預設關）；獨立 token client（`CALENDAR_SCOPE`、`getCalToken(prompt,hint)`）；開關開啟時**強制 select_account** 選事件要進的帳號、顯示 `calendarEmail`、加 **🔧 測試寫入鈕**；整理後 `autoAddCalendarForTasks` 對「本次新建且有截止日」任務建全天事件、`t.calEventId` 防重、卡片標「📅已加入行事曆✓」；子分類轉來的任務**不**自動加入。
+  - **⚠實機踩雷（已解決）**：測試 403 = **Calendar API 未在 Cloud 專案啟用**。到 Google Cloud Console 專案 **682239566772**（血壓/課務/記事本三 App 共用）啟用「Google Calendar API」即可；**要用擁有該專案的 Google 帳號登入 Console**（登錯帳號會見「需要額外存取權」牆→切帳號）。啟用後測試✅、實機正常。
 
 ## v16.03＝修「大檔上傳授權彈窗 popup_failed_to_open」（實機回報＋已驗證可用）
 - 真因：drive.file 同意彈窗若從「選檔 change 事件」觸發，使用者手勢已被檔案選擇器用掉→GIS 回 `popup_failed_to_open`。**彈窗只能由「直接點按鈕」這種新鮮手勢開啟。**（使用者實測：進「設定」子頁時因讀雲端狀態順勢跳出授權、拿到後就能上傳——旁證此結論。）
@@ -60,13 +68,19 @@
 - **可暫緩＋已完成任務堆疊 v14.04–06**：`buildTaskCard` 抽出；`buildTaskStack(items,kind,label,expanded,toggle)` 通用（low/done 共用）；`.card-stack` CSS 基底＋顏色修飾。疊紙：三張同尺寸、`translate(-5,-5)/(-10,-10)` 往右下、露左上角；`.low-stack` 全藍、`.done-stack` 前藍(可暫緩)/中黃(普通)/後紅(緊急)。`lowStackExpanded`/`doneStackExpanded` session-only 預設收合。
 
 ## 下一步
-- （無待接續工作。）v15.00 拆頁＋互斥規則已上線；可觀察實際使用 AI 分類是否夠準，不準時使用者用 🔄 更換鈕手動修正即可。
+- （無明確待接續工作。）可選：把「使用說明（helpModal）」補上「三層階層分類▸子分類▸項目、任務編輯、整理時自動加入行事曆」等新功能（目前說明落後）。
+- 觀察實際使用：AI 三層分類是否夠準（不準用 🔄/✏️ 手動修）；自動行事曆是否符合預期。
 
 ## 待決 / 卡住的問題
-- v15.00 preview 以注入 state 驗證（分頁切換、bullet↔task 互轉、各空狀態、全空 emptyHint/tabBar）皆通過、無 console error；**尚未實跑一次真實「整理」驗證新 SYSTEM_PROMPT 的互斥效果**（需 API 金鑰／中繼站，preview 未設）。使用者實際整理後若發現仍有兩邊重複或分錯，回報再微調 prompt。
-- 電子發票 QR **相機掃描路徑未真機測**（in-app Browser 無 BarcodeDetector；解析函式已頁內單元測通過）。使用者可拿紙本電子發票在 Android 手機實測；若品名亂碼或金額不符再回報調整編碼處理。
+- **（已解決）整理時自動加入行事曆未寫入** → 真因＝Calendar API 未在 Cloud 專案 682239566772 啟用（實機測試鈕回 403）；使用者已用擁有專案的帳號在 Console 啟用，實機測試事件成功建入 calvincat@ttct.edu.tw 行事曆。功能正常運作。
+- v17.x preview 以注入 state 驗證（三層渲染、子分類增刪改、項目增刪改、任務編輯持久化、子分類↔任務雙向轉換、共用附件位置、遷移、行事曆 UI/標示/開關 guard）皆通過、無 console error。實際 Calendar 寫入已真機驗證。
+- 電子發票 QR **相機掃描路徑未真機測**（沿用）。
 
 ## 注意事項（給另一台的 Claude）
+- **筆記本＝三層「分類▸子分類▸項目」**（v17.00）：子分類=subsection(有 `sub.id`)、項目=bullet。空子分類是合法的、**不要自動清除**（`removeBulletsByIds` 只清本次清空的 sub）。「改為待辦任務」在**子分類**層級（`convertSubToTask`），項目→`task.desc`。
+- **task 有 `desc:[{id,text}]`**（說明事項）：任務編輯 ✏️ `buildTaskEditor` 可改截止日+說明；`orphanAttachments` 認 desc id（轉換帶走的附件不孤兒）。
+- **整理時自動加入行事曆**：opt-in `settings.autoAddCalendar`；**獨立** cal token client（`CALENDAR_SCOPE`，勿併入 DRIVE_SCOPE）；開關開啟走 `select_account` 讓使用者選帳號、存 `settings.calendarEmail`；silent 取 token 用 `hint` 綁定帳號（多帳號雷）；只加「整理當下新建且有截止日」的任務、`t.calEventId` 防重；子分類轉來的任務不自動加入。**Calendar API 需在 Cloud 專案 682239566772 啟用**（見上）。設定頁有 🔧 測試寫入鈕可診斷。
+- **共用附件顯示在各子分類最底部**（`subSharedIds`），非分類卡片底部。
 - 疊紙堆疊 class 已從 `low-stack-*` 改為共用 `card-stack-*`；顏色由 `.low-stack`/`.done-stack` 修飾。改樣式勿再用舊 class 名。
 - QR 解析：前 77 碼固定 ASCII 可靠、品目段防禦式解析、失敗退整張；expense `inv` 欄位（防重掃）勿刪、`normalizeState` 已保留。
 - 摺疊/編輯/堆疊狀態（expandedCats/expandedTasks/editingCats/editingBullets/lowStackExpanded/doneStackExpanded/**currentPage**）皆 session-only、不持久化、不同步。currentPage 每次開啟一律回 'tasks'（待辦任務為首頁）。
