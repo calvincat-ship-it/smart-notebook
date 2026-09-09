@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v17.01';
+const APP_VERSION = 'v17.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -2352,20 +2352,6 @@ function renderCategories(orphans) {
     const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
     const catAttCount = cat.id ? attachmentsForItems([cat.id]).length : 0;
 
-    // Shared attachments: when one file is linked to 2+ items inside THIS category
-    // (e.g. Claude ties one document to several bullets), don't repeat the chip
-    // under every item — show it once at the bottom of the card instead. A file on
-    // a single item still shows under that item.
-    const catBulletIds = new Set();
-    for (const s of subs) for (const b of (s.bullets || [])) catBulletIds.add(b.id);
-    const sharedAttIds = new Set();
-    const sharedAtts = [];
-    for (const a of state.attachments) {
-      if (a.kind === 'link') continue; // link-type files are category-level already
-      let n = 0;
-      for (const id of (a.linkedItemIds || [])) if (catBulletIds.has(id)) n++;
-      if (n >= 2) { sharedAttIds.add(a.id); sharedAtts.push(a); }
-    }
 
     const editing = editingCats.has(cat);
     const head = document.createElement('div');
@@ -2456,6 +2442,20 @@ function renderCategories(orphans) {
     subs.forEach((sub) => {
       const subEl = document.createElement('div');
       subEl.className = 'subcat';
+
+      // Shared attachments within THIS 子分類: a file linked to 2+ of this 子分類's
+      // items (Claude often ties one document to several) is shown once at the
+      // bottom of the 子分類, not repeated under every item. A file on a single item
+      // still shows under that item.
+      const subBulletIds = new Set((sub.bullets || []).map((b) => b.id));
+      const subSharedIds = new Set();
+      const subSharedAtts = [];
+      for (const a of state.attachments) {
+        if (a.kind === 'link') continue;
+        let n = 0;
+        for (const id of (a.linkedItemIds || [])) if (subBulletIds.has(id)) n++;
+        if (n >= 2) { subSharedIds.add(a.id); subSharedAtts.push(a); }
+      }
 
       const subHead = document.createElement('div');
       subHead.className = 'subcat-head';
@@ -2571,8 +2571,8 @@ function renderCategories(orphans) {
         }
 
         // Files attached to this item — but not ones shared across several items in
-        // this category (those show once at the card bottom instead).
-        const atts = attachmentsForBullet(b.id).filter((a) => !sharedAttIds.has(a.id));
+        // this 子分類 (those show once at the 子分類 bottom instead).
+        const atts = attachmentsForBullet(b.id).filter((a) => !subSharedIds.has(a.id));
         if (atts.length) {
           const attRow = document.createElement('div');
           attRow.className = 'attach-row bullet-attach';
@@ -2583,6 +2583,14 @@ function renderCategories(orphans) {
         ul.appendChild(li);
       });
       subEl.appendChild(ul);
+
+      // Attachments shared by 2+ items of this 子分類 — shown once at its bottom.
+      if (subSharedAtts.length) {
+        const attRow = document.createElement('div');
+        attRow.className = 'attach-row subcat-attach';
+        for (const a of subSharedAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+        subEl.appendChild(attRow);
+      }
 
       const addItemBtn = document.createElement('button');
       addItemBtn.className = 'add-item-btn add-sub-item';
@@ -2599,20 +2607,13 @@ function renderCategories(orphans) {
       }
     });
 
-    // Card-bottom attachments: files uploaded to the category itself, plus files
-    // shared by 2+ items in this category (shown once here instead of per item).
+    // Files uploaded to the category itself (📎/📷/☁️ 大檔) or link-type — these
+    // aren't tied to any one 子分類, so they stay at the category-card bottom.
     const catAtts = cat.id ? attachmentsForItems([cat.id]) : [];
-    const seen = new Set();
-    const bottomAtts = [];
-    for (const a of [...sharedAtts, ...catAtts]) {
-      if (seen.has(a.id)) continue;
-      seen.add(a.id);
-      bottomAtts.push(a);
-    }
-    if (bottomAtts.length) {
+    if (catAtts.length) {
       const attRow = document.createElement('div');
       attRow.className = 'attach-row cat-attach';
-      for (const a of bottomAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+      for (const a of catAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
       bodyEl.appendChild(attRow);
     }
 

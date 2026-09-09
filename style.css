@@ -476,6 +476,7 @@ input.subcat-title { background: #fff; outline: 2px solid var(--accent-soft); }
 .bullet:hover .bullet-edit { color: var(--ink-soft); }
 .bullet-edit:active { color: var(--accent); }
 .add-sub-item { margin-top: 6px; font-size: .78rem; padding: 4px 10px; }
+.subcat-attach { margin-top: 6px; }
 
 .cat-empty-hint { color: var(--ink-soft); font-size: .85rem; padding: 8px 2px 4px; }
 
