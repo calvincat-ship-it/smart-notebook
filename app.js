@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v17.00';
+const APP_VERSION = 'v17.01';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -2352,6 +2352,21 @@ function renderCategories(orphans) {
     const totalBullets = subs.reduce((n, s) => n + ((s.bullets && s.bullets.length) || 0), 0);
     const catAttCount = cat.id ? attachmentsForItems([cat.id]).length : 0;
 
+    // Shared attachments: when one file is linked to 2+ items inside THIS category
+    // (e.g. Claude ties one document to several bullets), don't repeat the chip
+    // under every item — show it once at the bottom of the card instead. A file on
+    // a single item still shows under that item.
+    const catBulletIds = new Set();
+    for (const s of subs) for (const b of (s.bullets || [])) catBulletIds.add(b.id);
+    const sharedAttIds = new Set();
+    const sharedAtts = [];
+    for (const a of state.attachments) {
+      if (a.kind === 'link') continue; // link-type files are category-level already
+      let n = 0;
+      for (const id of (a.linkedItemIds || [])) if (catBulletIds.has(id)) n++;
+      if (n >= 2) { sharedAttIds.add(a.id); sharedAtts.push(a); }
+    }
+
     const editing = editingCats.has(cat);
     const head = document.createElement('div');
     head.className = 'category-head';
@@ -2555,8 +2570,9 @@ function renderCategories(orphans) {
           setTimeout(() => { span.focus(); placeCaretEnd(span); }, 0);
         }
 
-        // Files attached to this item.
-        const atts = attachmentsForBullet(b.id);
+        // Files attached to this item — but not ones shared across several items in
+        // this category (those show once at the card bottom instead).
+        const atts = attachmentsForBullet(b.id).filter((a) => !sharedAttIds.has(a.id));
         if (atts.length) {
           const attRow = document.createElement('div');
           attRow.className = 'attach-row bullet-attach';
@@ -2583,12 +2599,20 @@ function renderCategories(orphans) {
       }
     });
 
-    // Files uploaded to the category itself (not tied to any one note item).
+    // Card-bottom attachments: files uploaded to the category itself, plus files
+    // shared by 2+ items in this category (shown once here instead of per item).
     const catAtts = cat.id ? attachmentsForItems([cat.id]) : [];
-    if (catAtts.length) {
+    const seen = new Set();
+    const bottomAtts = [];
+    for (const a of [...sharedAtts, ...catAtts]) {
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      bottomAtts.push(a);
+    }
+    if (bottomAtts.length) {
       const attRow = document.createElement('div');
       attRow.className = 'attach-row cat-attach';
-      for (const a of catAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
+      for (const a of bottomAtts) attRow.appendChild(makeAttachChip(a, { removable: true }));
       bodyEl.appendChild(attRow);
     }
 
