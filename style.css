@@ -495,7 +495,7 @@ input.subcat-title { background: #fff; outline: 2px solid var(--accent-soft); }
   flex-direction: column;
   gap: 8px;
 }
-.te-field { display: flex; align-items: center; gap: 8px; }
+.te-field { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .te-label { flex: 0 0 auto; font-size: .8rem; color: var(--ink-soft); min-width: 3.4em; }
 .te-input {
   flex: 1; min-width: 0;
@@ -505,6 +505,7 @@ input.subcat-title { background: #fff; outline: 2px solid var(--accent-soft); }
 }
 .te-input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .te-date { flex: 0 0 auto; }
+.te-time { flex: 0 0 auto; max-width: 8.5em; }
 .te-clear-date { flex: 0 0 auto; border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: .8rem; }
 .te-desc-label { font-size: .8rem; color: var(--ink-soft); }
 .te-desc-list { display: flex; flex-direction: column; gap: 6px; }

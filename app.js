@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v17.05';
+const APP_VERSION = 'v18.00';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -269,10 +269,15 @@ function normalizeState(s) {
         ? { id: genId(), text: d }
         : { id: (d && d.id) ? d.id : genId(), text: (d && typeof d.text === 'string') ? d.text : '' }
     )).filter((d) => d.text.trim() !== '');
+    // Time span: startAt (optional) → endAt (deadline). Migrate legacy dueDate.
+    const endAt = taskEndAt(t);
+    const startAt = normDT(t.startAt);
     return {
       id: t.id || ('tk_' + genId()),
       task: t.task || '',
-      dueDate: t.dueDate || '',
+      startAt,
+      endAt,
+      dueDate: datePartOf(endAt), // mirror of endAt's date part (legacy logic depends on it)
       importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
       sourceCategory: t.sourceCategory || '',
       desc,
@@ -777,11 +782,13 @@ function buildSchema(hasAttachments) {
           properties: {
             task: { type: 'string' },
             dueDate: { type: 'string' },
+            startAt: { type: 'string' },
+            endAt: { type: 'string' },
             importance: { type: 'string', enum: ['high', 'medium', 'low'] },
             sourceCategory: { type: 'string' },
             desc: { type: 'array', items: { type: 'string' } },
           },
-          required: ['task', 'dueDate', 'importance', 'sourceCategory', 'desc'],
+          required: ['task', 'dueDate', 'startAt', 'endAt', 'importance', 'sourceCategory', 'desc'],
           additionalProperties: false,
         },
       },
@@ -831,8 +838,10 @@ const SYSTEM_PROMPT = [
   '判斷不確定時，若讀起來像「一件要去做的事」就當 task，像「一則要記住／參考的資訊」就當筆記。同一件事不可同時出現在 tasks 和 categories。',
   '',
   '關於 tasks：',
-  '1. 把明確待辦整理成 tasks。每筆有 task（事項標題，一句話講清楚要做什麼）、dueDate、importance、sourceCategory、desc（說明事項）。',
-  '   dueDate 一律用 YYYY-MM-DD 格式；沒有明確日期就留空字串。相對日期（例如「下週三」「月底前」）請依使用者提供的今天日期換算成實際日期。',
+  '1. 把明確待辦整理成 tasks。每筆有 task（事項標題，一句話講清楚要做什麼）、dueDate、startAt、endAt、importance、sourceCategory、desc（說明事項）。',
+  '   dueDate 一律用 YYYY-MM-DD 格式（＝這件事的截止／結束日期）；沒有明確日期就留空字串。相對日期（例如「下週三」「月底前」）請依使用者提供的今天日期換算成實際日期。',
+  '   startAt＝任務的「起始時間」、endAt＝「結束／截止時間」，供有明確時段的事情使用（例如會議、活動）。格式：有時分用 YYYY-MM-DDTHH:mm（例：2026-09-20T14:00），只有日期用 YYYY-MM-DD，沒有就留空字串。',
+  '   規則：endAt 的日期要與 dueDate 一致（endAt 有值時 dueDate＝endAt 的日期部分）；只有截止日、沒有明確起始時間時 startAt 留空、endAt 可留空（用 dueDate 即可）；內容有講「幾點到幾點」才填時分。',
   '   importance（重要性）只能是 high / medium / low，依「任務本身的影響與後果」判斷——攸關考核／法規期限／對他人有重大影響＝high；例行、可有可無、影響很小＝low；其餘＝medium。importance 只看任務本身的份量，不要把「時間急不急」算進去（急迫程度由 App 依截止日另外計算）。',
   '   sourceCategory＝這件事所屬的主題／情境的簡短詞（例如「部門會議」「評鑑」），沒有就留空字串。',
   '   desc＝這件事的「說明事項」，用簡短條列（字串陣列）列出要做的細項、注意事項、要帶的東西等；若沒有可補充的細節就給空陣列 []。不要把 task 標題本身重複放進 desc。',
@@ -1307,10 +1316,13 @@ function appendTasks(tasks) {
       .map((d) => (typeof d === 'string' ? d : (d && d.text) || ''))
       .filter((x) => x.trim() !== '')
       .map((text) => ({ id: genId(), text }));
+    const endAt = taskEndAt(t);
     const nt = {
       id: 'tk_' + genId(),
       task: t.task,
-      dueDate: t.dueDate || '',
+      startAt: normDT(t.startAt),
+      endAt,
+      dueDate: datePartOf(endAt),
       importance: ['high', 'medium', 'low'].includes(t.importance) ? t.importance : 'medium',
       sourceCategory: t.sourceCategory || '',
       desc,
@@ -1536,11 +1548,32 @@ function gcalLink(task) {
   const params = new URLSearchParams();
   params.set('text', task.task);
   if (task.sourceCategory) params.set('details', '來自記事本分類：' + task.sourceCategory);
-  if (task.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate)) {
-    const d = task.dueDate.replace(/-/g, '');
-    // All-day event on the due date. Google's all-day format needs END = next day
-    // (exclusive). Add a day using local date parts to avoid a UTC roll-back.
-    const [y, m, day] = task.dueDate.split('-').map(Number);
+  const startAt = task.startAt || '';
+  const endAt = task.endAt || (/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate || '') ? task.dueDate : '');
+  if (hasTimePart(startAt) || hasTimePart(endAt)) {
+    // Timed event: YYYYMMDDTHHMMSS/YYYYMMDDTHHMMSS (floating local time).
+    const s = startAt || endAt;
+    let e = endAt || startAt;
+    const compact = (v) => {
+      const dp = datePartOf(v).replace(/-/g, '');
+      const tp = (timePartOf(v) || '00:00').replace(':', '');
+      return dp + 'T' + tp + '00';
+    };
+    let cs = compact(s), ce = compact(e);
+    if (ce <= cs) { // ensure end after start (default +1h when equal/missing)
+      const [y, mo, d] = datePartOf(s).split('-').map(Number);
+      const [hh, mm] = (timePartOf(s) || '00:00').split(':').map(Number);
+      const nx = new Date(y, mo - 1, d, hh + 1, mm);
+      ce = nx.getFullYear() + String(nx.getMonth() + 1).padStart(2, '0') + String(nx.getDate()).padStart(2, '0')
+        + 'T' + String(nx.getHours()).padStart(2, '0') + String(nx.getMinutes()).padStart(2, '0') + '00';
+    }
+    params.set('dates', `${cs}/${ce}`);
+  } else if (endAt || startAt) {
+    // All-day event spanning the date(s). Google's all-day END is exclusive (+1 day).
+    const sd = datePartOf(startAt) || datePartOf(endAt);
+    const ed = datePartOf(endAt) || datePartOf(startAt);
+    const d = sd.replace(/-/g, '');
+    const [y, m, day] = ed.split('-').map(Number);
     const nx = new Date(y, m - 1, day + 1);
     const end =
       nx.getFullYear() +
@@ -1619,6 +1652,61 @@ function dueSuffix(ymd) {
 function todayStr() {
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+/* ---------------- Task time (startAt / endAt) helpers ----------------
+   A task's time is now a span: startAt (optional) → endAt (the deadline).
+   Each value is '' | 'YYYY-MM-DD' (all-day) | 'YYYY-MM-DDTHH:mm' (timed).
+   t.dueDate is kept as a mirror of endAt's DATE part so all existing
+   deadline logic (priority, sort, ICS, busy-day guard) keeps working. */
+function datePartOf(s) {
+  return (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}/.test(s)) ? s.slice(0, 10) : '';
+}
+function timePartOf(s) {
+  const m = (typeof s === 'string') && s.match(/^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/);
+  return m ? m[1] : '';
+}
+function hasTimePart(s) { return !!timePartOf(s); }
+// Normalize any incoming value to '' | 'YYYY-MM-DD' | 'YYYY-MM-DDTHH:mm'.
+function normDT(s) {
+  if (typeof s !== 'string') return '';
+  const t = s.trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(t)) return t.slice(0, 16);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  return '';
+}
+// Derive endAt (fallback to the legacy dueDate) and mirror dueDate onto the task.
+function taskEndAt(raw) {
+  let end = normDT(raw && raw.endAt);
+  if (!end && /^\d{4}-\d{2}-\d{2}$/.test((raw && raw.dueDate) || '')) end = raw.dueDate;
+  return end;
+}
+function syncDueMirror(t) { t.dueDate = datePartOf(t.endAt || ''); }
+// Short display like '9/15' or '9/15 14:00'.
+function fmtDT(s) {
+  const dp = datePartOf(s);
+  if (!dp) return '';
+  const [, mo, d] = dp.split('-');
+  const tp = timePartOf(s);
+  return Number(mo) + '/' + Number(d) + (tp ? (' ' + tp) : '');
+}
+// Badge text for a task's time span (start optional; end drives the suffix).
+function taskWhenText(t) {
+  const s = t.startAt || '';
+  const e = t.endAt || '';
+  const suffix = dueSuffix(datePartOf(e) || datePartOf(s));
+  if (s && e) {
+    if (datePartOf(s) === datePartOf(e)) {
+      // Same day: show the date once, then the times (if any).
+      const ts = timePartOf(s), te = timePartOf(e);
+      if (ts || te) return fmtDT(s) + '–' + (te || '（未定）') + suffix;
+      return fmtDT(e) + suffix;
+    }
+    return fmtDT(s) + ' → ' + fmtDT(e) + suffix;
+  }
+  if (e) return fmtDT(e) + suffix;
+  if (s) return '起 ' + fmtDT(s);
+  return '';
 }
 
 /* ---------------- Attachment lookups + delete cascade ---------------- */
@@ -2096,10 +2184,11 @@ function renderTasks() {
 
     const metaRow = document.createElement('div');
     metaRow.className = 'task-meta';
-    if (t.dueDate) {
+    const whenText = taskWhenText(t);
+    if (whenText) {
       const due = document.createElement('span');
       due.className = 'due-badge';
-      due.textContent = '📅 ' + t.dueDate + dueSuffix(t.dueDate);
+      due.textContent = '📅 ' + whenText;
       metaRow.appendChild(due);
     }
     if (t.sourceCategory) {
@@ -2259,27 +2348,49 @@ function buildTaskEditor(t) {
   titleField.appendChild(titleInput);
   box.appendChild(titleField);
 
-  // Due date (時間)
-  const dateField = mkField('截止日');
-  const dateInput = document.createElement('input');
-  dateInput.type = 'date';
-  dateInput.className = 'te-input te-date';
-  dateInput.value = /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate || '') ? t.dueDate : '';
-  dateInput.addEventListener('change', () => {
-    t.dueDate = dateInput.value || '';
-    delete t.priorityOverride; // let the date drive 緊急程度 again after a date change
-    saveState();
-    renderTasks(); // due badge + sorting + priority depend on the date
-  });
-  dateField.appendChild(dateInput);
-  const clearDate = document.createElement('button');
-  clearDate.type = 'button';
-  clearDate.className = 'te-clear-date';
-  clearDate.textContent = '清除';
-  clearDate.title = '清除截止日';
-  clearDate.addEventListener('click', () => { t.dueDate = ''; saveState(); renderTasks(); });
-  dateField.appendChild(clearDate);
-  box.appendChild(dateField);
+  // Time span: 起始時間 (optional) → 結束時間 (deadline). Each is a date input plus
+  // an optional time input, so a value can be an all-day date OR a date + clock time
+  // (a single datetime-local input can't represent a date with no time).
+  const mkTimeField = (labelText, getVal, setVal, clearTitle) => {
+    const field = mkField(labelText);
+    const dateInput = document.createElement('input');
+    dateInput.type = 'date';
+    dateInput.className = 'te-input te-date';
+    dateInput.value = datePartOf(getVal());
+    const timeInput = document.createElement('input');
+    timeInput.type = 'time';
+    timeInput.className = 'te-input te-time';
+    timeInput.value = timePartOf(getVal());
+    const commit = () => {
+      const d = dateInput.value;
+      const tm = timeInput.value;
+      // No date → no value (a bare time is meaningless). Date + time → timed; date only → all-day.
+      setVal(d ? (tm ? (d + 'T' + tm) : d) : '');
+      syncDueMirror(t);
+      delete t.priorityOverride; // let the date drive 緊急程度 again after a change
+      saveState();
+      renderTasks(); // badge + sorting + priority depend on the end date
+    };
+    dateInput.addEventListener('change', commit);
+    timeInput.addEventListener('change', commit);
+    field.appendChild(dateInput);
+    field.appendChild(timeInput);
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'te-clear-date';
+    clear.textContent = '清除';
+    clear.title = clearTitle;
+    clear.addEventListener('click', () => {
+      setVal('');
+      syncDueMirror(t);
+      saveState();
+      renderTasks();
+    });
+    field.appendChild(clear);
+    box.appendChild(field);
+  };
+  mkTimeField('起始時間（選填）', () => t.startAt, (v) => { t.startAt = v; }, '清除起始時間');
+  mkTimeField('結束時間', () => t.endAt, (v) => { t.endAt = v; }, '清除結束時間');
 
   // 說明事項 (description items)
   const descLabel = document.createElement('div');
@@ -2884,6 +2995,8 @@ function convertSubToTask(cat, sub) {
   const task = {
     id: 'tk_' + genId(),
     task: sub.heading || '',
+    startAt: '',
+    endAt: '',
     dueDate: '',
     importance: 'medium',
     sourceCategory: cat.title && cat.title !== UNCAT_TITLE ? cat.title : '',
@@ -3085,21 +3198,42 @@ async function calFetch(url, opts) {
   if (res.status === 401) { calToken = null; await ensureCalTokenSilent(); res = await run(); }
   return res;
 }
-// Build an all-day event body for a task (matches the manual gcalLink behaviour).
+// Build a Google Calendar event body for a task. Timed when startAt/endAt carry a
+// clock time; otherwise an all-day event spanning the date(s) (matches gcalLink).
+const CAL_TZ = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Taipei'; }
+  catch (e) { return 'Asia/Taipei'; }
+})();
 function calEventBody(t) {
-  const [y, m, d] = t.dueDate.split('-').map(Number);
-  const nx = new Date(y, m - 1, d + 1);
-  const endDate = nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0');
+  const startAt = t.startAt || '';
+  const endAt = t.endAt || (/^\d{4}-\d{2}-\d{2}$/.test(t.dueDate || '') ? t.dueDate : '');
   const descLines = [];
   if (t.sourceCategory) descLines.push('主題：' + t.sourceCategory);
   for (const dd of (t.desc || [])) if (dd.text) descLines.push('・' + dd.text);
   descLines.push('（由智慧記事本整理時自動加入）');
-  return {
-    summary: t.task,
-    description: descLines.join('\n'),
-    start: { date: t.dueDate },
-    end: { date: endDate },
-  };
+  const base = { summary: t.task, description: descLines.join('\n') };
+  if (hasTimePart(startAt) || hasTimePart(endAt)) {
+    // Timed event. Fill a default time / end where one side is missing.
+    const s = startAt || endAt;
+    let e = endAt || startAt;
+    const iso = (v) => datePartOf(v) + 'T' + (timePartOf(v) || '00:00') + ':00';
+    let sIso = iso(s), eIso = iso(e);
+    if (eIso <= sIso) {
+      const [y, mo, d] = datePartOf(s).split('-').map(Number);
+      const [hh, mm] = (timePartOf(s) || '00:00').split(':').map(Number);
+      const nx = new Date(y, mo - 1, d, hh + 1, mm);
+      eIso = nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0')
+        + 'T' + String(nx.getHours()).padStart(2, '0') + ':' + String(nx.getMinutes()).padStart(2, '0') + ':00';
+    }
+    return { ...base, start: { dateTime: sIso, timeZone: CAL_TZ }, end: { dateTime: eIso, timeZone: CAL_TZ } };
+  }
+  // All-day: start = earliest date, end = latest date + 1 (exclusive).
+  const sd = datePartOf(startAt) || datePartOf(endAt);
+  const ed = datePartOf(endAt) || datePartOf(startAt);
+  const [y, m, d] = ed.split('-').map(Number);
+  const nx = new Date(y, m - 1, d + 1);
+  const endDate = nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0');
+  return { ...base, start: { date: sd }, end: { date: endDate } };
 }
 // Insert one task as an all-day Google Calendar event; records the event id on the
 // task so it isn't added twice. Returns true on success.
