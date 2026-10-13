@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v18.02';
+const APP_VERSION = 'v18.03';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -2108,9 +2108,11 @@ function renderTasks() {
   function buildTaskCard(t, p) {
     const meta = TIER_META[p.tier];
     const item = document.createElement('div');
-    // 普通 cards collapse to just the badge + title; 緊急 stays open; 可暫緩 shows
-    // as a full card inside the stack (the stack itself is the collapse control).
-    const collapsible = p.tier === 'normal';
+    // 普通 and (pending) 可暫緩 cards collapse to just the badge + title; 緊急 stays
+    // open. Opening the 可暫緩 stack therefore only reveals the collapsed cards —
+    // each one still has to be tapped to expand. Cards in the 已完成 stack keep
+    // their old behaviour (only 普通 ones collapse).
+    const collapsible = p.tier === 'normal' || (p.tier === 'low' && !t.done);
     const expanded = !collapsible || expandedTasks.has(t.id);
     item.className = 'task-item ' + meta.cls + (t.done ? ' done' : '')
       + (collapsible ? ' collapsible' : '') + (collapsible && !expanded ? ' collapsed' : '');
