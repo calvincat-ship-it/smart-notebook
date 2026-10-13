@@ -14,7 +14,7 @@ const USAGE_KEY = 'smart_notebook_usage_v1';
 // on. Versioning follows the blood-pressure app's rule: form vNN.MM — small
 // changes bump the minor directly (v9 → v9.01), big features confirm first.
 // Keep in step with the sw.js CACHE_NAME on every deploy.
-const APP_VERSION = 'v18.01';
+const APP_VERSION = 'v18.02';
 
 const CLOUD_KEY = 'smart_notebook_cloud_v1';
 const GOOGLE_CLIENT_ID = '682239566772-bl0vpkhi4hj1ih33gv6uheic2iqqojp6.apps.googleusercontent.com';
@@ -1682,6 +1682,12 @@ function taskEndAt(raw) {
   return end;
 }
 function syncDueMirror(t) { t.dueDate = datePartOf(t.endAt || ''); }
+// Sort key for the task list: the date the work is scheduled for — startAt when
+// set, otherwise endAt (the deadline). '' means the task has no date at all, and
+// those sort to the end of their priority tier. Lexicographic order works for
+// both forms ('YYYY-MM-DD' sorts before the same day's 'YYYY-MM-DDTHH:mm', i.e.
+// all-day before timed).
+function taskSortKey(t) { return normDT(t && t.startAt) || normDT(t && t.endAt) || ''; }
 // Short display like '9/15' or '9/15 14:00'.
 function fmtDT(s) {
   const dp = datePartOf(s);
@@ -2038,15 +2044,18 @@ function renderTasks() {
   }
 
   // Sort: not-done first; then by priority tier (urgent→normal→low); within a
-  // tier by combined score desc, then earliest due date.
+  // tier by the 辦理日期 (taskSortKey: startAt, else endAt) earliest-first, with
+  // undated tasks last in that tier, then combined score desc as the tiebreak.
   const withPri = pending.map((t) => ({ t, p: priorityOf(t) }));
   withPri.sort((a, b) => {
     if (a.t.done !== b.t.done) return a.t.done ? 1 : -1;
     const ra = TIER_META[a.p.tier].rank, rb = TIER_META[b.p.tier].rank;
     if (ra !== rb) return ra - rb;
+    const ka = taskSortKey(a.t), kb = taskSortKey(b.t);
+    if (!ka !== !kb) return ka ? -1 : 1;              // undated → end of the tier
+    if (ka && ka !== kb) return ka.localeCompare(kb); // earliest 辦理日期 first
     if (a.p.total !== b.p.total) return b.p.total - a.p.total;
-    const da = a.t.dueDate || '9999-99-99', db = b.t.dueDate || '9999-99-99';
-    return da.localeCompare(db);
+    return 0;
   });
 
   // Render order: active 緊急/普通 cards, then the 可暫緩 stack (a single collapsed
